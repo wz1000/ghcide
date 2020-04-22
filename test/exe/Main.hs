@@ -1366,7 +1366,11 @@ findDefinitionAndHoverTests = let
   mkFindTests tests = testGroup "get"
     [ testGroup "definition" $ mapMaybe fst tests
     , testGroup "hover"      $ mapMaybe snd tests
+    , testGroup "type-definition" $ typeDefinitionTests
     , checkFileCompiles sourceFilePath ]
+
+  typeDefinitionTests = [ tst (getTypeDefinitions, checkDefs) dcL7 tcData "Saturated data con"
+                        , tst (getTypeDefinitions, checkDefs) opL16 [ExpectNoDefinitions] "Polymorphic variable"]
 
   test runDef runHover look expect = testM runDef runHover look (return expect)
 
@@ -1375,7 +1379,6 @@ findDefinitionAndHoverTests = let
     , runHover $ tst hover look expect title ) where
       def   = (getDefinitions, checkDefs)
       hover = (getHover      , checkHover)
-      --type_ = (getTypeDefinitions, checkTDefs) -- getTypeDefinitions always times out
 
   -- search locations            expectations on results
   fffL4  = _start fffR     ;  fffR = mkRange 8  4    8  7 ; fff  = [ExpectRange fffR]
