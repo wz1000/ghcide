@@ -328,7 +328,6 @@ runBench Bench {..} = handleAny (\e -> print e >> return badRun)
               output (showDuration t)
               loop (n -1)
 
-    (runExperiment, success) <- duration $ loop samples
 
     -- sleep to give ghcide a chance to GC
     liftIO $ threadDelay 1100000
@@ -342,6 +341,8 @@ runBench Bench {..} = handleAny (\e -> print e >> return badRun)
       unwords $
         [ ghcide ?config,
           "--lsp",
+          "--test",
+          "--verbose",
           "--cwd",
           dir,
           "+RTS",
