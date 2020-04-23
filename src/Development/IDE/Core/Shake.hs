@@ -6,6 +6,8 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeFamilies               #-}
 {-# LANGUAGE ConstraintKinds            #-}
+{-# LANGUAGE PatternSynonyms            #-}
+{-# LANGUAGE ExplicitNamespaces         #-}
 
 -- | A Shake implementation of the compiler service.
 --
@@ -27,13 +29,19 @@ module Development.IDE.Core.Shake(
     shakeOpen, shakeShut,
     shakeRestart,
     shakeEnqueue,
+    shakeRunInternal, shakeRunUser,
     shakeProfile,
-    use, useWithStale, useNoFile, uses, usesWithStale,
+    use, useWithStale, useNoFile, uses, usesWithStale, useWithStaleFast, useWithStaleFast', delayedAction,
+    FastResult(..),
     use_, useNoFile_, uses_,
     define, defineEarlyCutoff, defineOnDisk, needOnDisk, needOnDisks,
     getDiagnostics, unsafeClearDiagnostics,
     getHiddenDiagnostics,
     IsIdeGlobal, addIdeGlobal, addIdeGlobalExtras, getIdeGlobalState, getIdeGlobalAction,
+    getIdeGlobalExtras,
+    getIdeOptions,
+    getIdeOptionsIO,
+    GlobalIdeOptions(..),
     garbageCollect,
     setPriority,
     sendEvent,
@@ -44,9 +52,12 @@ module Development.IDE.Core.Shake(
     updatePositionMapping,
     deleteValue,
     OnDiskRule(..),
+
+    delay, DelayedAction, mkDelayedAction,
+    IdeAction(..), runIdeAction
     ) where
 
-import           Development.Shake hiding (ShakeValue, doesFileExist)
+import           Development.Shake hiding (ShakeValue, doesFileExist, Info)
 import           Development.Shake.Database
 import           Development.Shake.Classes
 import           Development.Shake.Rule
@@ -59,12 +70,12 @@ import Data.Map.Strict (Map)
 import           Data.List.Extra (partition, takeEnd)
 import qualified Data.Set as Set
 import qualified Data.Text as T
-import Data.Traversable (for)
 import Data.Tuple.Extra
 import Data.Unique
 import Development.IDE.Core.Debouncer
 import Development.IDE.Core.PositionMapping
 import Development.IDE.Types.Logger hiding (Priority)
+import qualified Development.IDE.Types.Logger as Logger
 import Language.Haskell.LSP.Diagnostics
 import qualified Data.SortedList as SL
 import           Development.IDE.Types.Diagnostics
@@ -88,6 +99,9 @@ import           GHC.Generics
 import           System.IO.Unsafe
 import Language.Haskell.LSP.Types
 import Data.Foldable (traverse_)
+import Control.Monad.IO.Class
+import Control.Monad.Reader
+import Data.Traversable
 
 
 -- information we stash inside the shakeExtra field
@@ -115,8 +129,9 @@ data ShakeExtras = ShakeExtras
     -- ^ Whether to send Progress messages to the client
     ,ideTesting :: IdeTesting
     -- ^ Whether to enable additional lsp messages used by the test suite for checking invariants
-    ,restartShakeSession :: [Action ()] -> IO ()
+    ,session :: MVar ShakeSession
     -- ^ Used in the GhcSession rule to forcefully restart the session after adding a new component
+    ,restartShakeSession :: [DelayedAction ()] -> IO ()
     }
 
 getShakeExtras :: Action ShakeExtras
@@ -160,7 +175,7 @@ getIdeGlobalState :: forall a . IsIdeGlobal a => IdeState -> IO a
 getIdeGlobalState = getIdeGlobalExtras . shakeExtras
 
 
--- | The state of the all values.
+ -- | The state of the all values.
 type Values = HMap.HashMap (NormalizedFilePath, Key) (Value Dynamic)
 
 -- | Key type
@@ -175,6 +190,28 @@ instance Eq Key where
 
 instance Hashable Key where
     hashWithSalt salt (Key key) = hashWithSalt salt (typeOf key, key)
+
+newtype GlobalIdeOptions = GlobalIdeOptions IdeOptions
+instance IsIdeGlobal GlobalIdeOptions
+
+getIdeOptions :: Action IdeOptions
+getIdeOptions = do
+    GlobalIdeOptions x <- getIdeGlobalAction
+    return x
+
+getIdeOptionsIO :: ShakeExtras -> IO IdeOptions
+getIdeOptionsIO ide = do
+    GlobalIdeOptions x <- getIdeGlobalExtras ide
+    return x
+
+-- | The result of an IDE operation. Warnings and errors are in the Diagnostic,
+--   and a value is in the Maybe. For operations that throw an error you
+--   expect a non-empty list of diagnostics, at least one of which is an error,
+--   and a Nothing. For operations that succeed you expect perhaps some warnings
+--   and a Just. For operations that depend on other failing operations you may
+--   get empty diagnostics and a Nothing, to indicate this phase throws no fresh
+--   errors but still failed.
+--
 
 data Value v
     = Succeeded TextDocumentVersion v
@@ -193,14 +230,20 @@ currentValue Failed = Nothing
 
 -- | Return the most recent, potentially stale, value and a PositionMapping
 -- for the version of that value.
-lastValue :: NormalizedFilePath -> Value v -> Action (Maybe (v, PositionMapping))
-lastValue file v = do
-    ShakeExtras{positionMapping} <- getShakeExtras
+lastValueIO :: ShakeExtras -> NormalizedFilePath -> Value v -> IO (Maybe (v, PositionMapping))
+lastValueIO ShakeExtras{positionMapping} file v = do
     allMappings <- liftIO $ readVar positionMapping
     pure $ case v of
         Succeeded ver v -> Just (v, mappingForVersion allMappings file ver)
         Stale ver v -> Just (v, mappingForVersion allMappings file ver)
         Failed -> Nothing
+
+-- | Return the most recent, potentially stale, value and a PositionMapping
+-- for the version of that value.
+lastValue :: NormalizedFilePath -> Value v -> Action (Maybe (v, PositionMapping))
+lastValue file v = do
+    s <- getShakeExtras
+    liftIO $ lastValueIO s file v
 
 valueVersion :: Value v -> Maybe TextDocumentVersion
 valueVersion = \case
@@ -229,14 +272,11 @@ type IdeRule k v =
 -- | A live Shake session with the ability to enqueue Actions for running.
 --   Keeps the 'ShakeDatabase' open, so at most one 'ShakeSession' per database.
 data ShakeSession = ShakeSession
-  { cancelShakeSession :: !(IO [Action ()])
+  { cancelShakeSession :: !(IO [DelayedActionInternal])
     -- ^ Closes the Shake session and returns the pending user actions
-  , runInShakeSession  :: !(forall a . Action a -> IO (IO a))
-    -- ^ Enqueue a user action in the Shake session.
+  , runInShakeSession  :: !(forall a . DelayedAction a -> IO (IO a))
+    -- ^ Enqueue an action in the Shake session.
   }
-
-emptyShakeSession :: ShakeSession
-emptyShakeSession = ShakeSession (pure []) (\_ -> error "emptyShakeSession")
 
 -- | A Shake database plus persistent store. Can be thought of as storing
 --   mappings from @(FilePath, k)@ to @RuleResult k@.
@@ -247,6 +287,7 @@ data IdeState = IdeState
     ,shakeExtras     :: ShakeExtras
     ,shakeProfileDir :: Maybe FilePath
     }
+
 
 
 -- This is debugging code that generates a series of profiles, if the Boolean is true
@@ -329,13 +370,15 @@ shakeOpen getLspId eventer logger debouncer shakeProfileDir (IdeReportProgress r
         publishedDiagnostics <- newVar mempty
         positionMapping <- newVar HMap.empty
         let restartShakeSession = shakeRestart ideState
+        let session = shakeSession
         pure ShakeExtras{..}
     (shakeDbM, shakeClose) <-
         shakeOpenDatabase
             opts { shakeExtra = addShakeExtra shakeExtras $ shakeExtra opts }
             rules
-    shakeSession <- newMVar emptyShakeSession
     shakeDb <- shakeDbM
+    initSession <- newSession (shakeExtras { reportProgress = False }) shakeDb [] []
+    shakeSession <- newMVar initSession
     let ideState = IdeState{..}
     return ideState
 
@@ -397,6 +440,7 @@ shakeShut IdeState{..} = withMVar shakeSession $ \runner -> do
     void $ cancelShakeSession runner
     shakeClose
 
+
 -- | This is a variant of withMVar where the first argument is run unmasked and if it throws
 -- an exception, the previous value is restored while the second argument is executed masked.
 withMVar' :: MVar a -> (a -> IO b) -> (b -> IO (a, c)) -> IO c
@@ -407,12 +451,72 @@ withMVar' var unmasked masked = mask $ \restore -> do
     putMVar var a'
     pure c
 
+
+-- | Actions with an ID for tracing purposes
+data DelayedActionExtra
+  = DelayedActionExtra
+  { _actionInternalId :: Unique
+  , _actionInternal :: Action ()
+  }
+
+type DelayedAction a = DelayedActionX (Action a)
+type DelayedActionInternal = DelayedActionX DelayedActionExtra
+
+{-# COMPLETE DelayedActionInternal#-}
+pattern DelayedActionInternal :: String -> Logger.Priority -> Action () -> Unique -> DelayedActionX DelayedActionExtra
+pattern DelayedActionInternal { _actionInternalName, _actionInternalPriority, getAction , _actionId}
+  = DelayedActionX _actionInternalName _actionInternalPriority (DelayedActionExtra _actionId getAction)
+
+{-# COMPLETE DelayedAction#-}
+pattern DelayedAction :: String ->  Logger.Priority -> Action a -> DelayedAction a
+pattern DelayedAction a b c = DelayedActionX a b c
+
+mkDelayedAction :: String -> Logger.Priority -> Action a -> DelayedAction a
+mkDelayedAction = DelayedAction
+
+data DelayedActionX a = DelayedActionX
+  { actionName :: String -- ^ Name we show to the user
+  , actionPriority :: Logger.Priority -- ^ Priority with which to log the action
+  , _actionExtra :: a -- ^ The payload
+  }
+
+instance Show (DelayedActionX a) where
+    show d = "DelayedAction: " ++ actionName d
+
+-- | These actions are run asynchronously after the current action is
+-- finished running. For example, to trigger a key build after a rule
+-- has already finished as is the case with useWithStaleFast
+delayedAction :: DelayedAction a -> IdeAction (IO a)
+delayedAction a = do
+  sq <- session <$> ask
+  liftIO $ shakeEnqueueSession sq a
+
+-- | A varient of delayedAction for the Action monad
+-- The supplied action *will* be run but at least not until the current action has finished.
+delay :: String -> Action () -> Action ()
+delay herald a = do
+    ShakeExtras{session} <- getShakeExtras
+    let da = mkDelayedAction herald Info a
+    -- Do not wait for the action to return
+    void $ liftIO $ shakeEnqueueSession session da
+
+-- | Running an action which DIRECTLY corresponds to something a user did,
+-- for example computing hover information.
+shakeRunUser :: IdeState -> [DelayedAction a] -> IO ([IO a])
+shakeRunUser ide as = mapM (shakeEnqueue ide) as
+
+-- | Running an action which is INTERNAL to shake, for example, a file has
+-- been modified, basically any use of shakeRun which is not blocking (ie
+-- which is not called via runAction).
+shakeRunInternal :: IdeState -> [DelayedAction a] -> IO ()
+shakeRunInternal ide as = void $ shakeRunUser ide as
+
 -- | Restart the current 'ShakeSession' with the given system actions.
 --   Any computation running in the current session will be aborted,
 --   but user actions (added via 'shakeEnqueue') will be requeued.
 --   Progress is reported only on the system actions.
-shakeRestart :: IdeState -> [Action ()] -> IO ()
-shakeRestart it@IdeState{shakeExtras=ShakeExtras{logger}, ..} systemActs =
+shakeRestart :: IdeState -> [DelayedAction a] -> IO ()
+shakeRestart IdeState{..} systemActs =
     withMVar'
         shakeSession
         (\runner -> do
@@ -421,7 +525,7 @@ shakeRestart it@IdeState{shakeExtras=ShakeExtras{logger}, ..} systemActs =
               let profile = case res of
                       Just fp -> ", profile saved at " <> fp
                       _ -> ""
-              logDebug logger $ T.pack $
+              logDebug (logger shakeExtras) $ T.pack $
                   "Restarting build session (aborting the previous one took " ++
                   showDuration stopTime ++ profile ++ ")"
               return queue
@@ -429,29 +533,33 @@ shakeRestart it@IdeState{shakeExtras=ShakeExtras{logger}, ..} systemActs =
         -- It is crucial to be masked here, otherwise we can get killed
         -- between spawning the new thread and updating shakeSession.
         -- See https://github.com/digital-asset/ghcide/issues/79
-        (fmap (,()) . newSession it systemActs)
+        (\cancelled -> do
+          (_b, dai) <- unzip <$> mapM instantiateDelayedAction systemActs
+          (,()) <$> newSession shakeExtras shakeDb dai cancelled)
 
 -- | Enqueue an action in the existing 'ShakeSession'.
 --   Returns a computation to block until the action is run, propagating exceptions.
 --   Assumes a 'ShakeSession' is available.
 --
 --   Appropriate for user actions other than edits.
-shakeEnqueue :: IdeState -> Action a -> IO (IO a)
-shakeEnqueue IdeState{shakeSession} act =
-    withMVar shakeSession $ \s -> runInShakeSession s act
+shakeEnqueue :: IdeState -> DelayedAction a -> IO (IO a)
+shakeEnqueue IdeState{shakeSession} act = shakeEnqueueSession shakeSession act
+
+shakeEnqueueSession :: MVar ShakeSession -> DelayedAction a -> IO (IO a)
+shakeEnqueueSession sess act = withMVar sess $ \s -> runInShakeSession s act
 
 -- Set up a new 'ShakeSession' with a set of initial system and user actions
 -- Will crash if there is an existing 'ShakeSession' running.
 -- Progress is reported only on the system actions.
 -- Only user actions will get re-enqueued
-newSession :: IdeState -> [Action ()] -> [Action ()] -> IO ShakeSession
-newSession IdeState{shakeExtras=ShakeExtras{..}, ..} systemActs userActs = do
+newSession :: ShakeExtras -> ShakeDatabase -> [DelayedActionInternal] -> [DelayedActionInternal] -> IO ShakeSession
+newSession ShakeExtras{..} shakeDb systemActs userActs = do
     -- A work queue for actions added via 'runInShakeSession'
-    actionQueue :: TQueue (Action ()) <- atomically $ do
+    actionQueue :: TQueue DelayedActionInternal <- atomically $ do
         q <- newTQueue
         traverse_ (writeTQueue q) userActs
         return q
-    actionInProgress :: TVar (Maybe (Action())) <- newTVarIO Nothing
+    actionInProgress :: TVar (Maybe DelayedActionInternal) <- newTVarIO Nothing
 
     let
         -- A daemon-like action used to inject additional work
@@ -461,7 +569,7 @@ newSession IdeState{shakeExtras=ShakeExtras{..}, ..} systemActs userActs = do
                 join $ liftIO $ atomically $ do
                     act <- readTQueue actionQueue
                     writeTVar actionInProgress $ Just act
-                    return act
+                    return (logDelayedAction logger act)
                 liftIO $ atomically $ writeTVar actionInProgress Nothing
 
         progressRun
@@ -471,7 +579,7 @@ newSession IdeState{shakeExtras=ShakeExtras{..}, ..} systemActs userActs = do
         workRun restore = withAsync progressRun $ \progressThread -> do
           let systemActs' =
                 [ [] <$ pumpAction
-                , parallel systemActs
+                , parallel (map getAction systemActs)
                     -- Only system actions are considered for progress reporting
                     -- When done, cancel the progressThread to indicate completion
                     <* liftIO (cancel progressThread)
@@ -492,17 +600,18 @@ newSession IdeState{shakeExtras=ShakeExtras{..}, ..} systemActs userActs = do
     -- run the wrap up unmasked
     _ <- async $ join $ wait workThread
 
+
     -- 'runInShakeSession' is used to append work in this Shake session
     --  The session stays open until 'cancelShakeSession' is called
-    let runInShakeSession :: forall a . Action a -> IO (IO a)
-        runInShakeSession act = do
-              res <- newBarrier
-              let act' = actionCatch @SomeException (Right <$> act) (pure . Left)
-              atomically $ writeTQueue actionQueue (act' >>= liftIO . signalBarrier res)
-              return (waitBarrier res >>= either throwIO return)
+    let runInShakeSession :: forall a . DelayedAction a -> IO (IO a)
+        runInShakeSession da = do
+              (b, dai) <- instantiateDelayedAction da
+              atomically $ writeTQueue actionQueue dai
+              return (waitBarrier b >>= either throwIO return)
 
     --  Cancelling is required to flush the Shake database when either
     --  the filesystem or the Ghc configuration have changed
+        cancelShakeSession :: IO [DelayedActionInternal]
         cancelShakeSession = do
             cancel workThread
             atomically $ do
@@ -511,6 +620,25 @@ newSession IdeState{shakeExtras=ShakeExtras{..}, ..} systemActs userActs = do
                 return (maybe [] pure c ++ q)
 
     pure (ShakeSession{..})
+
+instantiateDelayedAction :: DelayedAction a
+                         -> IO (Barrier (Either SomeException a), DelayedActionInternal)
+instantiateDelayedAction (DelayedAction s p a) = do
+    b <- newBarrier
+    i <- newUnique
+    let a' = do r <- actionCatch @SomeException (Right <$> a) (pure . Left)
+                liftIO $ signalBarrier b r
+    let d = DelayedActionInternal s p a' i
+    return (b, d)
+
+logDelayedAction :: Logger -> DelayedActionInternal -> Action ()
+logDelayedAction l d  = do
+    start <- liftIO $ offsetTime
+    getAction d
+    runTime <- liftIO $ start
+    return ()
+    liftIO $ logPriority l (actionPriority d) $ T.pack $
+        "finish: " ++ (actionName d) ++ " (took " ++ showDuration runTime ++ ")"
 
 getDiagnostics :: IdeState -> IO [FileDiagnostic]
 getDiagnostics IdeState{shakeExtras = ShakeExtras{diagnostics}} = do
@@ -555,6 +683,62 @@ use key file = head <$> uses key [file]
 useWithStale :: IdeRule k v
     => k -> NormalizedFilePath -> Action (Maybe (v, PositionMapping))
 useWithStale key file = head <$> usesWithStale key [file]
+
+newtype IdeAction a = IdeAction { runIdeActionT  :: (ReaderT ShakeExtras IO) a }
+    deriving (MonadReader ShakeExtras, MonadIO, Functor, Applicative, Monad)
+
+-- | IdeActions are used when we want to return a result immediately, even if it
+-- is stale Useful for UI actions like hover, completion where we don't want to
+-- block.
+runIdeAction :: String -> ShakeExtras -> IdeAction a -> IO a
+runIdeAction _herald s i = do
+    res <- runReaderT (runIdeActionT i) s
+    return res
+
+askShake :: IdeAction ShakeExtras
+askShake = ask
+
+-- | A (maybe) stale result now, and an up to date one later
+data FastResult a = FastResult { stale :: Maybe (a,PositionMapping), uptoDate :: IO (Maybe a)  }
+
+-- | Lookup value in the database and return with the stale value immediately
+-- Will queue an action to refresh the value.
+-- Never blocks.
+useWithStaleFast :: IdeRule k v => k -> NormalizedFilePath -> IdeAction (Maybe (v, PositionMapping))
+useWithStaleFast key file = stale <$> useWithStaleFast' key file
+
+-- | Same as useWithStaleFast but lets you wait for an up to date result
+useWithStaleFast' :: IdeRule k v => k -> NormalizedFilePath -> IdeAction (FastResult v)
+useWithStaleFast' key file = do
+  -- This lookup directly looks up the key in the shake database and
+  -- returns the last value that was computed for this key without
+  -- checking freshness.
+
+  -- Async trigger the key to be built anyway because we want to
+  -- keep updating the value in the key.
+  wait <- delayedAction $ mkDelayedAction ("C:" ++ (show key)) Debug $ use key file
+
+  s@ShakeExtras{state} <- askShake
+  r <- liftIO $ getValues state key file
+  liftIO $ case r of
+    Nothing -> do
+      IdeTesting testing <- optTesting <$> getIdeOptionsIO s
+      if testing
+      then do
+        -- If testing, block for the result if we haven't computed before
+        a <- wait
+        r <- getValues state key file
+        case r of
+          Nothing -> return $ FastResult Nothing (pure a)
+          Just v -> do
+            res <- lastValueIO s file v
+            pure $ FastResult res (pure a)
+      -- Perhaps we should do this while not testing too
+      else return $ FastResult Nothing wait
+    -- Otherwise, use the computed value even if it's out of date.
+    Just v -> do
+      res <- lastValueIO s file v
+      pure $ FastResult res wait
 
 useNoFile :: IdeRule k v => k -> Action (Maybe v)
 useNoFile key = use key emptyFilePath
@@ -778,12 +962,12 @@ decodeShakeValue bs = case BS.uncons bs of
       | otherwise -> error $ "Failed to parse shake value " <> show bs
 
 
-updateFileDiagnostics ::
-     NormalizedFilePath
+updateFileDiagnostics :: MonadIO m
+  => NormalizedFilePath
   -> Key
   -> ShakeExtras
   -> [(ShowDiagnostic,Diagnostic)] -- ^ current results
-  -> Action ()
+  -> m ()
 updateFileDiagnostics fp k ShakeExtras{diagnostics, hiddenDiagnostics, publishedDiagnostics, state, debouncer, eventer} current = liftIO $ do
     modTime <- (currentValue =<<) <$> getValues state GetModificationTime fp
     let (currentShown, currentHidden) = partition ((== ShowDiag) . fst) current

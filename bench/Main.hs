@@ -218,7 +218,7 @@ runBenchmarks benchmarks = do
     putStrLn $ intercalate ", " $ map (showDuration . snd) results
 
 runBench :: HasConfig => Bench -> IO Seconds
-runBench Bench {..} = handleAny (\e -> print e >> return (-1))
+runBench Bench {..} = handleAny (\e -> print e >> return (-2))
   $ runSessionWithConfig conf cmd lspTestCaps dir
   $ do
     doc <- openDoc exampleModulePath "haskell"
@@ -226,6 +226,8 @@ runBench Bench {..} = handleAny (\e -> print e >> return (-1))
 
     liftIO $ output $ "Running " <> name <> " benchmark"
     userState <- benchSetup doc
+    -- Initial run to warm up any caches
+    (t, res) <- duration $ experiment userState doc
     let loop 0 = return True
         loop n = do
           (t, res) <- duration $ experiment userState doc
@@ -236,17 +238,15 @@ runBench Bench {..} = handleAny (\e -> print e >> return (-1))
               loop (n -1)
 
     (t, res) <- duration $ loop samples
-
     exitServer
-    -- sleeep to give ghcide a chance to print the RTS stats
-    liftIO $ threadDelay 50000
-
     return $ if res then t else -1
   where
     cmd =
       unwords $
         [ "ghcide",
           "--lsp",
+          "--test",
+          "--verbose",
           "--cwd",
           dir,
           "+RTS",
@@ -275,6 +275,10 @@ setup = do
   writeFile
     (examplesPath </> examplePackage </> "hie.yaml")
     ("cradle: {cabal: {component: " <> show examplePackageName <> "}}")
+  -- Need this in case there is a parent cabal.project somewhere
+  writeFile
+    (examplesPath </> examplePackage </> "cabal.project")
+    "packages: ."
 
   whenJust (shakeProfiling ?config) $ createDirectoryIfMissing True
 
