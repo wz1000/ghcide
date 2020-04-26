@@ -9,7 +9,9 @@
 module Development.IDE.GHC.Compat(
     getHeaderImports,
     HieFileResult(..),
-    HieFile,
+    HieFile(..),
+    RefMap,
+    generateReferencesMap,
     hieExportNames,
     hie_module,
     mkHieFile,
@@ -48,6 +50,7 @@ import FieldLabel
 import Fingerprint (Fingerprint)
 import qualified Module
 import Packages
+import IfaceType
 
 import qualified GHC
 import GHC hiding (ClassOpSig, DerivD, ForD, IEThingAll, IEThingWith, InstD, TyClD, ValD, ModLocation)
@@ -65,6 +68,10 @@ import Control.Applicative ((<|>))
 import Development.IDE.GHC.HieAst (mkHieFile)
 import HieBin
 import HieTypes
+import HieUtils
+import Data.Map (Map)
+
+type RefMap = Map Identifier [(Span, IdentifierDetails TypeIndex)]
 
 supportsHieFiles :: Bool
 supportsHieFiles = True

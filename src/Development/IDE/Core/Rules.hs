@@ -23,12 +23,15 @@ module Development.IDE.Core.Rules(
     getAtPoint,
     getDefinition,
     getTypeDefinition,
+    highlightAtPoint,
     getDependencies,
     getParsedModule,
     generateCore,
     ) where
 
 import Fingerprint
+import Outputable hiding ((<>))
+import HieTypes
 
 import Data.Binary
 import Util
@@ -74,6 +77,7 @@ import HscTypes
 import PackageConfig
 import DynFlags (gopt_set, xopt)
 import GHC.Generics(Generic)
+import HieUtils
 
 import qualified Development.IDE.Spans.AtPoint as AtPoint
 import Development.IDE.Core.Service
@@ -88,6 +92,9 @@ import Control.Monad.Reader
 import System.Directory ( getModificationTime )
 import Control.Exception
 
+import           Language.Haskell.LSP.Types
+
+import System.IO
 -- | This is useful for rules to convert rules that can only produce errors or
 -- a result into the more general IdeResult type that supports producing
 -- warnings while also producing a result.
@@ -124,25 +131,35 @@ getAtPoint :: NormalizedFilePath -> Position -> IdeAction (Maybe (Maybe Range, [
 getAtPoint file pos = fmap join $ runMaybeT $ do
   ide <- ask
   opts <- liftIO $ getIdeOptionsIO ide
-  (spans, mapping) <- useE  GetSpanInfo file
+  (hf, mapping) <- useE GetHieFile file
   !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
-  return $ AtPoint.atPoint opts spans pos'
+  return $ AtPoint.atPoint opts hf pos'
 
 -- | Goto Definition.
 getDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe Location)
 getDefinition file pos = runMaybeT $ do
     ide <- ask
     opts <- liftIO $ getIdeOptionsIO ide
-    spans <- fst <$> useE GetSpanInfo file
-    AtPoint.gotoDefinition (getHieFile ide file) opts (spansExprs spans) pos
+    hf <- fst <$> useE GetHieFile file
+    AtPoint.gotoDefinition (getHieFile ide file) opts hf pos
 
 getTypeDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe Location)
 getTypeDefinition file pos = runMaybeT $ do
     ide <- ask
     opts <- liftIO $ getIdeOptionsIO ide
-    spans <- fst <$> useE GetSpanInfo file
-    AtPoint.gotoTypeDefinition (getHieFile ide file) opts (spansExprs spans) pos
+    hf <- fst <$> useE GetHieFile file
+    AtPoint.gotoTypeDefinition (getHieFile ide file) opts hf pos
 
+highlightAtPoint :: NormalizedFilePath -> Position -> IdeAction (Maybe [DocumentHighlight])
+highlightAtPoint file pos = runMaybeT $ do
+    liftIO $ hPutStrLn stderr "here0"
+    hf <- fst <$> useE GetHieFile file
+    liftIO $ hPutStrLn stderr "here1"
+    (PRefMap rf,mapping) <- useE GetRefMap file
+    liftIO $ hPutStrLn stderr "here2"
+    !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
+    liftIO $ hPutStrLn stderr "here3"
+    AtPoint.documentHighlight hf rf pos'
 
 getHieFile
   :: IdeState
@@ -409,27 +426,34 @@ getDependenciesRule =
         return (fingerprintToBS . fingerprintFingerprints <$> mbFingerprints, ([], transitiveDeps depInfo file))
 
 -- Source SpanInfo is used by AtPoint and Goto Definition.
-getSpanInfoRule :: Rules ()
-getSpanInfoRule =
-    define $ \GetSpanInfo file -> do
-        tc <- use_ TypeCheck file
-        packageState <- hscEnv <$> use_ GhcSession file
-        deps <- maybe (TransitiveDependencies [] [] []) fst <$> useWithStale GetDependencies file
-        let tdeps = transitiveModuleDeps deps
+getHieFileRule :: Rules ()
+getHieFileRule =
+    define $ \GetHieFile f -> do
+      ms <- use_ GetModSummary f
+      let normal_hie_f = toNormalizedFilePath' hie_f
+          hie_f = ml_hie_file $ ms_location ms
+      mbHieTimestamp <- use GetModificationTime normal_hie_f
+      srcTimestamp   <- use_ GetModificationTime f
 
--- When possible, rely on the haddocks embedded in our interface files
--- This creates problems on ghc-lib, see comment on 'getDocumentationTryGhc'
-#if MIN_GHC_API_VERSION(8,6,0) && !defined(GHC_LIB)
-        let parsedDeps = []
-#else
-        parsedDeps <- uses_ GetParsedModule tdeps
-#endif
+      let isUpToDate
+            | Just d <- mbHieTimestamp = comparing modificationTime d srcTimestamp == GT
+            | otherwise = False
 
-        ifaces <- uses_ GetModIface tdeps
-        (fileImports, _) <- use_ GetLocatedImports file
-        let imports = second (fmap artifactFilePath) <$> fileImports
-        x <- liftIO $ getSrcSpanInfos packageState imports tc parsedDeps (map hirModIface ifaces)
-        return ([], Just x)
+      unless isUpToDate $
+           void $ use_ TypeCheck f
+
+      hf <- liftIO $ if isUpToDate then Just <$> loadHieFile hie_f else pure Nothing
+      return ([], hf)
+
+getRefMapRule :: Rules ()
+getRefMapRule =
+    define $ \GetRefMap file -> do
+      liftIO $ hPutStrLn stderr "here ref0"
+      hf <- use_ GetHieFile file
+      liftIO $ hPutStrLn stderr "here ref1"
+      let asts = hie_asts hf
+          refmap = generateReferencesMap $ getAsts asts
+      return ([],Just $ PRefMap refmap)
 
 -- Typechecks a module.
 typeCheckRule :: Rules ()
@@ -460,7 +484,7 @@ typeCheckRuleDefinition
     -> ParsedModule
     -> GenerateInterfaceFiles -- ^ Should generate .hi and .hie files ?
     -> Action (IdeResult TcModuleResult)
-typeCheckRuleDefinition file pm generateArtifacts = do
+typeCheckRuleDefinition file pm _generateArtifacts = do
   deps <- use_ GetDependencies file
   hsc  <- hscEnv <$> use_ GhcSession file
   -- Figure out whether we need TemplateHaskell or QuasiQuotes support
@@ -480,12 +504,10 @@ typeCheckRuleDefinition file pm generateArtifacts = do
   liftIO $ do
     res <- typecheckModule defer hsc (zipWith unpack mirs bytecodes) pm
     case res of
-      (diags, Just (hsc,tcm)) | DoGenerateInterfaceFiles <- generateArtifacts -> do
+      (diags, Just (hsc,tcm)) -> do
         diagsHie <- generateAndWriteHieFile hsc (tmrModule tcm)
         diagsHi  <- generateAndWriteHiFile hsc tcm
         return (diags <> diagsHi <> diagsHie, Just tcm)
-      (diags, res) ->
-        return (diags, snd <$> res)
  where
   unpack HiFileResult{..} bc = (hirModSummary, (hirModIface, bc))
   uses_th_qq dflags =
@@ -665,7 +687,8 @@ mainRule = do
     reportImportCyclesRule
     getDependenciesRule
     typeCheckRule
-    getSpanInfoRule
+    getHieFileRule
+    getRefMapRule
     generateCoreRule
     generateByteCodeRule
     loadGhcSession

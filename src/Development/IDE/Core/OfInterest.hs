@@ -79,4 +79,4 @@ modifyFilesOfInterest state f = do
     OfInterestVar var <- getIdeGlobalState state
     files <- modifyVar var $ pure . dupe . f
     logDebug (ideLogger state) $ "Set files of interest to: " <> T.pack (show $ HashSet.toList files)
-    shakeRunInternal "OfInterest" state [uses GetSpanInfo (HashSet.toList files)]
+    shakeRunInternal "OfInterest" state [uses GetHieFile (HashSet.toList files)]

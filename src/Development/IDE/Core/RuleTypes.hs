@@ -27,7 +27,7 @@ import HscTypes (CgGuts, Linkable, HomeModInfo, ModDetails)
 
 import           Development.IDE.Spans.Type
 import           Development.IDE.Import.FindImports (ArtifactsLocation)
-
+import           Development.IDE.GHC.Compat
 
 -- NOTATION
 --   Foo+ means Foo for the dependencies
@@ -79,7 +79,16 @@ instance Show HiFileResult where
 type instance RuleResult TypeCheck = TcModuleResult
 
 -- | Information about what spans occur where, requires TypeCheck
-type instance RuleResult GetSpanInfo = SpansInfo
+type instance RuleResult GetHieFile = HieFile
+
+newtype PRefMap = PRefMap {getRefMap :: RefMap}
+instance NFData PRefMap where
+    rnf = rwhnf
+
+instance Show PRefMap where
+    show = const "refmap"
+
+type instance RuleResult GetRefMap = PRefMap
 
 -- | Convert to Core, requires TypeCheck*
 type instance RuleResult GenerateCore = (SafeHaskellMode, CgGuts, ModDetails)
@@ -152,11 +161,17 @@ instance Hashable TypeCheck
 instance NFData   TypeCheck
 instance Binary   TypeCheck
 
-data GetSpanInfo = GetSpanInfo
+data GetHieFile = GetHieFile
     deriving (Eq, Show, Typeable, Generic)
-instance Hashable GetSpanInfo
-instance NFData   GetSpanInfo
-instance Binary   GetSpanInfo
+instance Hashable GetHieFile
+instance NFData   GetHieFile
+instance Binary   GetHieFile
+
+data GetRefMap = GetRefMap
+    deriving (Eq, Show, Typeable, Generic)
+instance Hashable GetRefMap
+instance NFData   GetRefMap
+instance Binary   GetRefMap
 
 data GenerateCore = GenerateCore
     deriving (Eq, Show, Typeable, Generic)

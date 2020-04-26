@@ -196,9 +196,8 @@ setFileModified state prop nfp = do
     when (isJust setVirtualFileContents) $
         fail "setSomethingModified can't be called on this type of VFSHandle"
     shakeRunInternalKill "FileStoreTC" state
-      ([void (use GetSpanInfo nfp)]
+      ([void (use GetHieFile nfp)]
         ++ [typecheckParents nfp | prop])
-
 
 typecheckParents :: NormalizedFilePath -> Action ()
 typecheckParents nfp = do
