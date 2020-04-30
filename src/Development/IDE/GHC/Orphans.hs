@@ -3,6 +3,7 @@
 
 {-# LANGUAGE CPP               #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE CPP #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 #include "ghc-api-version.h"
 
@@ -54,7 +55,7 @@ instance Show ParsedModule where
 instance NFData ModSummary where
     rnf = rwhnf
 
-#if !MIN_GHC_API_VERSION(8,10,0)
+#if __GLASGOW_HASKELL__ < 810
 instance NFData FastString where
     rnf = rwhnf
 #endif
