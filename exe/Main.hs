@@ -166,8 +166,9 @@ main = do
 
         putStrLn "\nStep 4/6: Type checking the files"
         setFilesOfInterest ide $ HashSet.fromList $ map toNormalizedFilePath' files
---        _ <- runActionSync "TypecheckTest" ide $ uses TypeCheck (map toNormalizedFilePath' files)
+        _ <- runActionSync "TypecheckTest" ide $ uses TypeCheck (map toNormalizedFilePath' files)
 --        results <- runActionSync ide $ use TypeCheck $ toNormalizedFilePath' "src/Development/IDE/Core/Rules.hs"
+        {-
         let fp =  toNormalizedFilePath' "ghc/Main.hs"
         results <- runActionSync "tc" ide $ use TypeCheck $ toNormalizedFilePath' "ghc/Main.hs"
         hover1 <- duration $ runIdeAction "Hover" ide $ getAtPoint fp (Position 950 20)
@@ -176,6 +177,7 @@ main = do
         hover2 <- duration $ runIdeAction "Hover" ide $ getAtPoint fp (Position 950 20)
         print hover2
         traceMarkerIO "END"
+        -}
         cancel worker
         return ()
 
