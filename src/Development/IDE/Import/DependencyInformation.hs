@@ -62,7 +62,7 @@ data ModuleImports = ModuleImports
     -- that module on disk (if we found it)
     , packageImports :: !(Set InstalledUnitId)
     -- ^ Transitive package dependencies unioned for all imports.
-    }
+    } deriving Show
 
 -- | For processing dependency information, we need lots of maps and sets
 -- of filepaths. Comparing Strings is really slow, so we work with IntMap/IntSet
@@ -125,7 +125,7 @@ data RawDependencyInformation = RawDependencyInformation
     -- need to add edges between .hs-boot and .hs so that the .hs files
     -- appear later in the sort.
     , rawBootMap :: !BootIdMap
-    }
+    } deriving Show
 
 pkgDependencies :: RawDependencyInformation -> IntMap (Set InstalledUnitId)
 pkgDependencies RawDependencyInformation{..} =
