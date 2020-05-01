@@ -52,15 +52,13 @@ import Development.IDE.Types.Location
 import Development.IDE.GHC.Compat hiding (parseModule, typecheckModule)
 import Development.IDE.GHC.Util
 import Development.IDE.GHC.WithDynFlags
-import Data.Coerce
 import Data.Either.Extra
+import qualified Development.IDE.Types.Logger as L
 import Data.Maybe
 import           Data.Foldable
 import qualified Data.IntMap.Strict as IntMap
 import Data.IntMap.Strict (IntMap)
-import qualified Data.IntSet as IntSet
 import Data.List
-import Data.List.NonEmpty (NonEmpty(..))
 import Data.Ord
 import qualified Data.Set                                 as Set
 import qualified Data.HashSet                             as HS
@@ -107,7 +105,7 @@ useE :: IdeRule k v => k -> NormalizedFilePath -> MaybeT IdeAction (v, PositionM
 useE k = MaybeT . useWithStaleFast k
 
 useNoFileE :: IdeRule k v => IdeState -> k -> MaybeT IdeAction v
-useNoFileE ide k = fst <$> useE k emptyFilePath
+useNoFileE _ide k = fst <$> useE k emptyFilePath
 
 usesE :: IdeRule k v => k -> [NormalizedFilePath] -> MaybeT Action [v]
 usesE k = MaybeT . fmap sequence . uses k
@@ -196,9 +194,10 @@ getHomeHieFile f = do
     else do
       -- Could block here with a barrier rather than fail
       b <- liftIO $ newBarrier
-      lift $ delayedAction "OutOfDateHie" (do pm <- use_ GetParsedModule f
-                                              typeCheckRuleDefinition f pm DoGenerateInterfaceFiles
-                                              (liftIO $ signalBarrier b ()))
+      lift $ delayedAction (mkDelayedAction "OutOfDateHie" ("hie" :: T.Text, f) L.Info
+                              (do pm <- use_ GetParsedModule f
+                                  typeCheckRuleDefinition f pm DoGenerateInterfaceFiles
+                                  liftIO $ signalBarrier b ()))
       () <- MaybeT $ liftIO $ timeout 1 $ waitBarrier b
       liftIO $ loadHieFile hie_f
 
@@ -508,6 +507,7 @@ typeCheckRuleDefinition file pm _generateArtifacts = do
         diagsHie <- generateAndWriteHieFile hsc (tmrModule tcm)
         diagsHi  <- generateAndWriteHiFile hsc tcm
         return (diags <> diagsHi <> diagsHie, Just tcm)
+      (diags,Nothing) -> pure (diags, Nothing)
  where
   unpack HiFileResult{..} bc = (hirModSummary, (hirModIface, bc))
   uses_th_qq dflags =

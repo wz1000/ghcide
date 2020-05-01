@@ -29,7 +29,6 @@ import           GHC.Generics
 import Data.Either.Extra
 import System.IO.Error
 import qualified Data.ByteString.Char8 as BS
-import Data.HashSet as HS
 import Development.IDE.Types.Diagnostics
 import Development.IDE.Types.Location
 import Development.IDE.Core.RuleTypes
@@ -48,7 +47,7 @@ import Foreign.Storable
 import qualified System.Posix.Error as Posix
 #endif
 
-import Development.IDE.Core.RuleTypes
+import qualified Development.IDE.Types.Logger as L
 
 import Language.Haskell.LSP.Core
 import Language.Haskell.LSP.VFS
@@ -180,7 +179,7 @@ setBufferModified state absFile contents = do
     VFSHandle{..} <- getIdeGlobalState state
     whenJust setVirtualFileContents $ \set ->
         set (filePathToUri' absFile) contents
-    shakeRunInternalKill "FileStoreBuffer" state []
+    shakeRunInternalKill state []
 
 -- | Note that some buffer for a specific file has been modified but not
 -- with what changes.
@@ -195,9 +194,10 @@ setFileModified state prop nfp = do
     VFSHandle{..} <- getIdeGlobalState state
     when (isJust setVirtualFileContents) $
         fail "setSomethingModified can't be called on this type of VFSHandle"
-    shakeRunInternalKill "FileStoreTC" state
-      ([void (use GetHieFile nfp)]
-        ++ [typecheckParents nfp | prop])
+    let da = mkDelayedAction "FileStoreTC" (GetHieFile, nfp) L.Info (void $ use GetHieFile nfp)
+        parents = mkDelayedAction "ParentTC" ("Parents" :: String, nfp) L.Debug (typecheckParents nfp)
+    shakeRunInternalKill state
+      ([da] ++ [parents | prop])
 
 typecheckParents :: NormalizedFilePath -> Action ()
 typecheckParents nfp = do
@@ -213,4 +213,4 @@ setSomethingModified state = do
     VFSHandle{..} <- getIdeGlobalState state
     when (isJust setVirtualFileContents) $
         fail "setSomethingModified can't be called on this type of VFSHandle"
-    shakeRunInternalKill "FileStoreSomething" state []
+    shakeRunInternalKill state []
