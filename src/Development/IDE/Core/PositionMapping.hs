@@ -71,8 +71,8 @@ addDelta delta (PositionMapping pm) = PositionMapping (composeDelta delta pm)
 
 applyChange :: PositionDelta -> TextDocumentContentChangeEvent -> PositionDelta
 applyChange PositionDelta{..} (TextDocumentContentChangeEvent (Just r) _ t) = PositionDelta
-    { toDelta = toCurrent r t <=< toDelta
-    , fromDelta = fromDelta <=< fromCurrent r t
+    { toDelta = \x -> toCurrent r t =<< toDelta x
+    , fromDelta = \x -> fromDelta  =<< fromCurrent r t x
     }
 applyChange posMapping _ = posMapping
 
