@@ -55,8 +55,6 @@ import           Data.Foldable
 import qualified Data.IntMap.Strict as IntMap
 import Data.IntMap.Strict (IntMap)
 import Data.List
-import Data.List.NonEmpty (NonEmpty(..))
-import Data.Ord
 import qualified Data.Set                                 as Set
 import qualified Data.HashSet                             as HS
 import qualified Data.Text                                as T
@@ -100,7 +98,7 @@ useE :: IdeRule k v => k -> NormalizedFilePath -> MaybeT IdeAction (v, PositionM
 useE k = MaybeT . useWithStaleFast k
 
 useNoFileE :: IdeRule k v => IdeState -> k -> MaybeT IdeAction v
-useNoFileE ide k = fst <$> useE k emptyFilePath
+useNoFileE _ide k = fst <$> useE k emptyFilePath
 
 usesE :: IdeRule k v => k -> [NormalizedFilePath] -> MaybeT Action [v]
 usesE k = MaybeT . fmap sequence . uses k
