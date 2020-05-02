@@ -176,8 +176,8 @@ getHieFile ide file mod = do
 
 getHomeHieFile :: NormalizedFilePath -> MaybeT IdeAction HieFile
 getHomeHieFile f = do
-  hfr <- lift $ useWithStaleFast' GetHieFile f
-  case stale hfr of
+  hfr <- lift $ lookupStale GetHieFile f
+  case hfr of
     Just (hf,_) -> pure hf -- We already have the file
     Nothing -> do -- We don't have the file, so try loading it from disk
       ms <- fst <$> useE GetModSummary f
@@ -198,10 +198,8 @@ getHomeHieFile f = do
           hf <- liftIO $ if isUpToDate then Just <$> loadHieFile hie_f else pure Nothing
           MaybeT $ return hf
         else do
-          -- If not on disk, wait for the barrier
-          -- Could block here with a barrier rather than fail
-          mhf <- liftIO $ timeout 1 $ waitBarrier (uptoDate hfr)
-          MaybeT $ pure $ join mhf
+          -- If not on disk and we don't already have it, then give up
+          MaybeT $ pure Nothing
 
 
 getPackageHieFile :: IdeState
