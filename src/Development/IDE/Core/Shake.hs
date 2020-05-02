@@ -28,7 +28,7 @@ module Development.IDE.Core.Shake(
     shakeRun, shakeRunInternal, shakeRunInternalKill, shakeRunUser,
     shakeProfile,
     use, useWithStale, useNoFile, uses, usesWithStale, useWithStaleFast, delayedAction,
-    useWithStaleFast', FastResult(..), lookupStale,
+    useWithStaleFast', FastResult(..),
     use_, useNoFile_, uses_,
     define, defineEarlyCutoff, defineOnDisk, needOnDisk, needOnDisks,
     getDiagnostics, unsafeClearDiagnostics,
@@ -741,28 +741,25 @@ askShake = shakeExtras <$> ask
 -- A (maybe) stale result now, and an up to date one later
 data FastResult a = FastResult { stale :: Maybe (a,PositionMapping), uptoDate :: Barrier (Maybe a)  }
 
-lookupStale :: IdeRule k v => k -> NormalizedFilePath -> IdeAction (Maybe (v,PositionMapping))
-lookupStale key file = do
-  -- This lookup directly looks up the key in the shake database and
-  -- returns the last value that was computed for this key without
-  -- checking freshness.
-
-  s@ShakeExtras{state} <- askShake
-  r <- liftIO $ getValues state key file
-  case r of
-    Nothing -> do
-      -- Perhaps for Hover this should return Nothing immediatey but for
-      -- completions it should block? Not for MP to decide, need AZ and
-      -- F to comment
-      return Nothing
-      --useWithStale key file
-    -- Otherwise, use the computed value even if it's out of date.
-    Just v -> do
-      liftIO $ lastValueIO s file v
-
 useWithStaleFast' :: IdeRule k v => k -> NormalizedFilePath -> IdeAction (FastResult v)
 useWithStaleFast' key file = do
-  final_res <- lookupStale key file
+  final_res <-  do
+    -- This lookup directly looks up the key in the shake database and
+    -- returns the last value that was computed for this key without
+    -- checking freshness.
+
+    s@ShakeExtras{state} <- askShake
+    r <- liftIO $ getValues state key file
+    case r of
+      Nothing -> do
+        -- Perhaps for Hover this should return Nothing immediatey but for
+        -- completions it should block? Not for MP to decide, need AZ and
+        -- F to comment
+        return Nothing
+        --useWithStale key file
+      -- Otherwise, use the computed value even if it's out of date.
+      Just v -> do
+        liftIO $ lastValueIO s file v
   -- Then async trigger the key to be built anyway because we want to
   -- keep updating the value in the key.
   --shakeRunInternal ("C:" ++ (show key)) ide [use key file]
