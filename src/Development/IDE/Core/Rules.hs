@@ -31,7 +31,6 @@ module Development.IDE.Core.Rules(
 
 import Fingerprint
 import Outputable hiding ((<>))
-import HieTypes
 
 import Data.Binary
 import Util
@@ -75,7 +74,6 @@ import HscTypes
 import PackageConfig
 import DynFlags (gopt_set, xopt)
 import GHC.Generics(Generic)
-import HieUtils
 
 import qualified Development.IDE.Spans.AtPoint as AtPoint
 import Development.IDE.Core.Service
@@ -177,7 +175,7 @@ getHieFile ide file mod = do
 mkUpdater :: MaybeT IdeAction NameCacheUpdater
 mkUpdater = do
   ref <- lift $ ideNc <$> askShake
-  pure $ NCU (updNameCache ref)
+  pure $ NCU (upNameCache ref)
 
 getHomeHieFile :: NormalizedFilePath -> MaybeT IdeAction HieFile
 getHomeHieFile f = do

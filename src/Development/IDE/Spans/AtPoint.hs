@@ -39,8 +39,6 @@ import qualified Data.Text as T
 import qualified Data.Map as M
 import qualified Data.Array as A
 
-import HieTypes
-import HieUtils
 import IfaceType
 import Data.Either
 
