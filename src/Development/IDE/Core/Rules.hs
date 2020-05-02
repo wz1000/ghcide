@@ -176,30 +176,32 @@ getHieFile ide file mod = do
 
 getHomeHieFile :: NormalizedFilePath -> MaybeT IdeAction HieFile
 getHomeHieFile f = do
-  ms <- fst <$> useE GetModSummary f
-  let normal_hie_f = toNormalizedFilePath' hie_f
-      hie_f = ml_hie_file $ ms_location ms
+  hfr <- lift $ useWithStaleFast' GetHieFile f
+  case stale hfr of
+    Just (hf,_) -> pure hf -- We already have the file
+    Nothing -> do -- We don't have the file, so try loading it from disk
+      ms <- fst <$> useE GetModSummary f
 
-  mbHieTimestamp <- either (\(_ :: IOException) -> Nothing) Just <$> (liftIO $ try $ getModificationTime hie_f)
-  srcTimestamp   <- MaybeT (either (\(_ :: IOException) -> Nothing) Just <$> (liftIO $ try $ getModificationTime $ fromNormalizedFilePath f))
-  liftIO $ print (mbHieTimestamp, srcTimestamp, hie_f, normal_hie_f)
-  let isUpToDate
-        | Just d <- mbHieTimestamp = d > srcTimestamp
-        | otherwise = False
+      let normal_hie_f = toNormalizedFilePath' hie_f
+          hie_f = ml_hie_file $ ms_location ms
 
-  if isUpToDate
-    then do
-      hf <- liftIO $ if isUpToDate then Just <$> loadHieFile hie_f else pure Nothing
-      MaybeT $ return hf
-    else do
-      -- Could block here with a barrier rather than fail
-      b <- liftIO $ newBarrier
-      lift $ delayedAction (mkDelayedAction "OutOfDateHie" ("hie" :: T.Text, f) L.Info
-                              (do pm <- use_ GetParsedModule f
-                                  typeCheckRuleDefinition f pm DoGenerateInterfaceFiles
-                                  liftIO $ signalBarrier b ()))
-      () <- MaybeT $ liftIO $ timeout 1 $ waitBarrier b
-      liftIO $ loadHieFile hie_f
+      mbHieTimestamp <- either (\(_ :: IOException) -> Nothing) Just <$> (liftIO $ try $ getModificationTime hie_f)
+      srcTimestamp   <- MaybeT (either (\(_ :: IOException) -> Nothing) Just <$> (liftIO $ try $ getModificationTime $ fromNormalizedFilePath f))
+
+      liftIO $ print (mbHieTimestamp, srcTimestamp, hie_f, normal_hie_f)
+      let isUpToDate
+            | Just d <- mbHieTimestamp = d > srcTimestamp
+            | otherwise = False
+
+      if isUpToDate
+        then do
+          hf <- liftIO $ if isUpToDate then Just <$> loadHieFile hie_f else pure Nothing
+          MaybeT $ return hf
+        else do
+          -- If not on disk, wait for the barrier
+          -- Could block here with a barrier rather than fail
+          mhf <- liftIO $ timeout 1 $ waitBarrier (uptoDate hfr)
+          MaybeT $ pure $ join mhf
 
 
 getPackageHieFile :: IdeState
@@ -428,21 +430,12 @@ getDependenciesRule =
 getHieFileRule :: Rules ()
 getHieFileRule =
     define $ \GetHieFile f -> do
-      ms <- use_ GetModSummary f
-      let normal_hie_f = toNormalizedFilePath' hie_f
-          hie_f = ml_hie_file $ ms_location ms
-      mbHieTimestamp <- use GetModificationTime normal_hie_f
-      srcTimestamp   <- use_ GetModificationTime f
-
-      let isUpToDate
-            | Just d <- mbHieTimestamp = comparing modificationTime d srcTimestamp == GT
-            | otherwise = False
-
-      unless isUpToDate $
-           void $ use_ TypeCheck f
-
-      hf <- liftIO $ if isUpToDate then Just <$> loadHieFile hie_f else pure Nothing
-      return ([], hf)
+      tcm <- use_ TypeCheck f
+      case tmrHieFile tcm of
+        Just hf -> pure ([],Just hf)
+        Nothing -> do
+          hsc  <- hscEnv <$> use_ GhcSession f
+          liftIO $ generateAndWriteHieFile hsc (tmrModule tcm)
 
 getRefMapRule :: Rules ()
 getRefMapRule =
@@ -483,7 +476,7 @@ typeCheckRuleDefinition
     -> ParsedModule
     -> GenerateInterfaceFiles -- ^ Should generate .hi and .hie files ?
     -> Action (IdeResult TcModuleResult)
-typeCheckRuleDefinition file pm _generateArtifacts = do
+typeCheckRuleDefinition file pm generateArtifacts = do
   deps <- use_ GetDependencies file
   hsc  <- hscEnv <$> use_ GhcSession file
   -- Figure out whether we need TemplateHaskell or QuasiQuotes support
@@ -503,11 +496,11 @@ typeCheckRuleDefinition file pm _generateArtifacts = do
   liftIO $ do
     res <- typecheckModule defer hsc (zipWith unpack mirs bytecodes) pm
     case res of
-      (diags, Just (hsc,tcm)) -> do
-        diagsHie <- generateAndWriteHieFile hsc (tmrModule tcm)
+      (diags, Just (hsc,tcm)) | DoGenerateInterfaceFiles <- generateArtifacts -> do
+        (diagsHie,hf) <- generateAndWriteHieFile hsc (tmrModule tcm)
         diagsHi  <- generateAndWriteHiFile hsc tcm
-        return (diags <> diagsHi <> diagsHie, Just tcm)
-      (diags,Nothing) -> pure (diags, Nothing)
+        return (diags <> diagsHi <> diagsHie, Just tcm{tmrHieFile=hf})
+      (diags,res) -> pure (diags, snd<$>res)
  where
   unpack HiFileResult{..} bc = (hirModSummary, (hirModIface, bc))
   uses_th_qq dflags =

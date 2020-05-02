@@ -52,6 +52,7 @@ type instance RuleResult GetModuleGraph = DependencyInformation
 data TcModuleResult = TcModuleResult
     { tmrModule     :: TypecheckedModule
     , tmrModInfo    :: HomeModInfo
+    , tmrHieFile    :: Maybe HieFile
     }
 instance Show TcModuleResult where
     show = show . pm_mod_summary . tm_parsed_module . tmrModule
