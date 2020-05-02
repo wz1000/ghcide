@@ -10,6 +10,7 @@ module Development.IDE.GHC.Compat(
     getHeaderImports,
     HieFileResult(..),
     HieFile(..),
+    NameCacheUpdater(..),
     RefMap,
     generateReferencesMap,
     hieExportNames,
@@ -66,7 +67,7 @@ import HscTypes (mi_mod_hash)
 #if MIN_GHC_API_VERSION(8,8,0)
 import Control.Applicative ((<|>))
 import Development.IDE.GHC.HieAst (mkHieFile)
-import HieBin
+import Development.IDE.GHC.HieBin (readHieFile,writeHieFile,NameCacheUpdater(..),HieFileResult(..))
 import HieTypes
 import HieUtils
 import Data.Map (Map)

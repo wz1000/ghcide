@@ -11,6 +11,8 @@ import Data.Time.Clock (UTCTime)
 import Linker (initDynLinker)
 import Data.IORef
 import NameCache
+import UniqSupply
+import PrelInfo
 import Packages
 import Module
 import Arguments
@@ -127,6 +129,8 @@ main = do
         hPutStrLn stderr "If you are seeing this in a terminal, you probably should have run ghcide WITHOUT the --lsp option!"
         runLanguageServer options (pluginHandler plugins) onInitialConfiguration onConfigurationChange $ \getLspId event vfs caps -> do
             t <- t
+            us      <- mkSplitUniqSupply 'r'
+            nc_var  <- newIORef (initNameCache us knownKeyNames)
             hPutStrLn stderr $ "Started LSP server in " ++ showDuration t
             let options = (defaultIdeOptions $ loadSession dir)
                     { optReportProgress = clientSupportsProgress caps
@@ -138,7 +142,7 @@ main = do
                 logLevel = if argsVerbose then minBound else Info
             debouncer <- newAsyncDebouncer
             fst <$> initialise caps (mainRule >> pluginRules plugins)
-                      getLspId event (logger logLevel) debouncer options vfs
+                      getLspId event (logger logLevel) debouncer nc_var options vfs
     else do
         -- GHC produces messages with UTF8 in them, so make sure the terminal doesn't error
         hSetEncoding stdout utf8
@@ -161,7 +165,9 @@ main = do
         putStrLn "\nStep 3/6: Initializing the IDE"
         vfs <- makeVFSHandle
         debouncer <- newAsyncDebouncer
-        (ide, worker) <- initialise def mainRule (pure $ IdInt 0) (showEvent lock) (logger Debug) debouncer (defaultIdeOptions $ loadSession dir) vfs
+        us      <- mkSplitUniqSupply 'r'
+        nc_var  <- newIORef (initNameCache us knownKeyNames)
+        (ide, worker) <- initialise def mainRule (pure $ IdInt 0) (showEvent lock) (logger Debug) debouncer nc_var (defaultIdeOptions $ loadSession dir) vfs
 
         putStrLn "\nStep 4/6: Type checking the files"
         setFilesOfInterest ide $ HashSet.fromList $ map toNormalizedFilePath' files
@@ -220,12 +226,12 @@ cradleToSessionOpts cradle file = do
         CradleNone -> fail "'none' cradle is not yet supported"
     pure opts
 
-emptyHscEnv :: IO HscEnv
-emptyHscEnv = do
+emptyHscEnv :: IORef NameCache -> IO HscEnv
+emptyHscEnv nc = do
     libdir <- getLibdir
     env <- runGhc (Just libdir) getSession
     initDynLinker env
-    pure env
+    pure $ setNameCache nc env
 
 -- Convert a target to a list of potential absolute paths.
 -- A TargetModule can be anywhere listed by the supplied include
@@ -248,7 +254,9 @@ setNameCache nc hsc = hsc { hsc_NC = nc }
 -- components mapping to the same hie,yaml file are mapped to the same
 -- HscEnv which is updated as new components are discovered.
 loadSession :: FilePath -> Action (FilePath -> Action HscEnvEq)
-loadSession dir = liftIO $ do
+loadSession dir = do
+  nc <- ideNc <$> getShakeExtras
+  liftIO $ do
     -- Mapping from hie.yaml file to HscEnv, one per hie.yaml file
     hscEnvs <- newVar Map.empty
     -- Mapping from a filepath to HscEnv
@@ -269,7 +277,7 @@ loadSession dir = liftIO $ do
     -- which contains both.
     packageSetup <- return $ \(hieYaml, cfp, opts) -> do
         -- Parse DynFlags for the newly discovered component
-        hscEnv <- emptyHscEnv
+        hscEnv <- emptyHscEnv nc
         (df, targets) <- evalGhcEnv hscEnv $ do
                           setOptions opts (hsc_dflags hscEnv)
         dep_info <- getDependencyInfo (componentDependencies opts)
@@ -300,9 +308,7 @@ loadSession dir = liftIO $ do
             -- It's important to keep the same NameCache though for reasons
             -- that I do not fully understand
             print ("Making new HscEnv" ++ (show inplace))
-            hscEnv <- case oldDeps of
-                        Nothing -> emptyHscEnv
-                        Just (old_hsc, _) -> setNameCache (hsc_NC old_hsc) <$> emptyHscEnv
+            hscEnv <- emptyHscEnv nc
             newHscEnv <-
               -- Add the options for the current component to the HscEnv
               evalGhcEnv hscEnv $ do

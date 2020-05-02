@@ -47,7 +47,7 @@ module Development.IDE.Core.Shake(
     OnDiskRule(..),
 
     workerThread, delay, DelayedAction, mkDelayedAction,
-    IdeAction(..), runIdeAction
+    IdeAction(..), runIdeAction, askShake
     ) where
 
 import           Development.Shake hiding (ShakeValue, doesFileExist, Info)
@@ -98,6 +98,8 @@ import Control.Monad.Writer
 import qualified Data.HashPSQ as PQ
 import OpenTelemetry.Eventlog
 
+import Data.IORef
+import NameCache
 
 -- information we stash inside the shakeExtra field
 data ShakeExtras = ShakeExtras
@@ -119,6 +121,7 @@ data ShakeExtras = ShakeExtras
     ,inProgress :: Var (HMap.HashMap NormalizedFilePath Int)
     -- ^ How many rules are running for each file
     , queue :: ShakeQueue
+    , ideNc :: IORef NameCache
     }
 
 getShakeExtras :: Action ShakeExtras
@@ -515,10 +518,11 @@ shakeOpen :: IO LSP.LspId
           -> Debouncer NormalizedUri
           -> Maybe FilePath
           -> IdeReportProgress
+          -> IORef NameCache
           -> ShakeOptions
           -> Rules ()
           -> IO IdeState
-shakeOpen getLspId eventer logger debouncer shakeProfileDir (IdeReportProgress reportProgress) opts rules = do
+shakeOpen getLspId eventer logger debouncer shakeProfileDir (IdeReportProgress reportProgress) ideNc opts rules = do
     inProgress <- newVar HMap.empty
     shakeAbort <- newMVar $ return ()
     shakeQueue <- newShakeQueue

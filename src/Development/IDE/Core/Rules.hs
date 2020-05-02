@@ -174,6 +174,11 @@ getHieFile ide file mod = do
     _ -> getPackageHieFile ide mod file
 
 
+mkUpdater :: MaybeT IdeAction NameCacheUpdater
+mkUpdater = do
+  ref <- lift $ ideNc <$> askShake
+  pure $ NCU (updNameCache ref)
+
 getHomeHieFile :: NormalizedFilePath -> MaybeT IdeAction HieFile
 getHomeHieFile f = do
   hfr <- lift $ useWithStaleFast' GetHieFile f
@@ -195,7 +200,8 @@ getHomeHieFile f = do
 
       if isUpToDate
         then do
-          hf <- liftIO $ if isUpToDate then Just <$> loadHieFile hie_f else pure Nothing
+          upd <- mkUpdater
+          hf <- liftIO $ if isUpToDate then Just <$> loadHieFile upd hie_f else pure Nothing
           MaybeT $ return hf
         else do
           -- If not on disk, wait for the barrier
@@ -217,11 +223,12 @@ getPackageHieFile ide mod file = do
             -- 'optLocateHieFile' returns Nothing if the file does not exist
             hieFile <- liftIO $ optLocateHieFile optPkgLocationOpts pkgConfig mod
             path    <- liftIO $ optLocateSrcFile optPkgLocationOpts pkgConfig mod
+            upd <- mkUpdater
             case (hieFile, path) of
                 (Just hiePath, Just modPath) -> MaybeT $
                     -- deliberately loaded outside the Shake graph
                     -- to avoid dependencies on non-workspace files
-                        liftIO $ Just . (, modPath) <$> loadHieFile hiePath
+                        liftIO $ Just . (, modPath) <$> loadHieFile upd hiePath
                 _ -> MaybeT $ return Nothing
         _ -> MaybeT $ return Nothing
 
