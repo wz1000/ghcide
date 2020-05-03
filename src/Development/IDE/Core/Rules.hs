@@ -446,9 +446,24 @@ getRefMapRule =
 getDocMapRule :: Rules ()
 getDocMapRule =
     define $ \GetDocMap file -> do
+      tc <- tmrModule <$> use_ TypeCheck file
+      hsc <- hscEnv <$> use_ GhcSession file
       PRefMap rf <- use_ GetRefMap file
-      hsc  <- hscEnv <$> use_ GhcSession file
-      docMap <- liftIO $ evalGhcEnv hsc $ mkDocMap [] rf
+
+      deps <- maybe (TransitiveDependencies [] [] []) fst <$> useWithStale GetDependencies file
+      let tdeps = transitiveModuleDeps deps
+
+-- When possible, rely on the haddocks embedded in our interface files
+-- This creates problems on ghc-lib, see comment on 'getDocumentationTryGhc'
+#if MIN_GHC_API_VERSION(8,6,0) && !defined(GHC_LIB)
+      let parsedDeps = []
+#else
+      parsedDeps <- uses_ GetParsedModule tdeps
+#endif
+
+      ifaces <- uses_ GetModIface tdeps
+
+      docMap <- liftIO $ evalGhcEnv hsc $ mkDocMap parsedDeps rf tc (map hirModIface ifaces)
       return ([],Just $ PDocMap docMap)
 
 -- Typechecks a module.
