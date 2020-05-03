@@ -12,9 +12,7 @@ module Development.IDE.GHC.Compat(
     HieFile(..),
     NameCacheUpdater(..),
     RefMap,
-    generateReferencesMap,
     hieExportNames,
-    hie_module,
     mkHieFile,
     writeHieFile,
     readHieFile,
@@ -60,7 +58,6 @@ import FieldLabel
 import Fingerprint (Fingerprint)
 import qualified Module
 import Packages
-import IfaceType
 import Data.IORef
 import HscTypes
 import NameCache
@@ -89,20 +86,13 @@ import HieUtils
 #else
 
 #if MIN_GHC_API_VERSION(8,6,0)
-import BinIface
 import Development.IDE.GHC.HieTypes
 import Development.IDE.GHC.HieUtils
 #endif
 
-import Binary
 import Control.Exception (catch)
-import Data.ByteString (ByteString)
-import GhcPlugins hiding (ModLocation)
-import TcRnTypes
 import System.IO
 import Foreign.ForeignPtr
-import MkIface
-
 
 hPutStringBuffer :: Handle -> StringBuffer -> IO ()
 hPutStringBuffer hdl (StringBuffer buf len cur)

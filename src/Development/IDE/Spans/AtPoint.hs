@@ -18,8 +18,7 @@ import           Language.Haskell.LSP.Types
 -- DAML compiler and infrastructure
 import Development.IDE.GHC.Compat
 import Development.IDE.Types.Options
-import Development.IDE.Spans.Type as SpanInfo
-import Development.IDE.Spans.Common (spanDocToMarkdown)
+import Development.IDE.Spans.Common
 
 -- GHC API imports
 import DynFlags
@@ -27,8 +26,6 @@ import FastString
 import Name
 import Outputable hiding ((<>))
 import SrcLoc
-import Type
-import VarSet
 
 import Control.Monad.Extra
 import Control.Monad.Trans.Maybe
@@ -90,7 +87,7 @@ atPoint
   -> DocMap
   -> Position
   -> Maybe (Maybe Range, [T.Text])
-atPoint IdeOptions{..} hf dm pos = listToMaybe $ pointCommand hf pos hoverInfo
+atPoint IdeOptions{} hf dm pos = listToMaybe $ pointCommand hf pos hoverInfo
   where
     -- Hover info for values/data
     hoverInfo ast =
@@ -192,7 +189,3 @@ showName = T.pack . prettyprint
     prettyprint x = renderWithStyle unsafeGlobalDynFlags (ppr x) style
     style = mkUserStyle unsafeGlobalDynFlags neverQualify AllTheWay
 
-getModuleNameAsText :: Name -> Maybe T.Text
-getModuleNameAsText n = do
-  m <- nameModule_maybe n
-  return . T.pack . moduleNameString $ moduleName m

@@ -20,7 +20,6 @@ import qualified Data.Text as T
 import           Development.IDE.GHC.Compat
 import           Development.IDE.GHC.Error
 import           Development.IDE.Spans.Common
-import           Development.IDE.Spans.Type
 import           FastString
 import SrcLoc
 import Data.Foldable

@@ -25,7 +25,7 @@ import           GHC
 import Module (InstalledUnitId)
 import HscTypes (CgGuts, Linkable, HomeModInfo, ModDetails)
 
-import           Development.IDE.Spans.Type
+import           Development.IDE.Spans.Common
 import           Development.IDE.Import.FindImports (ArtifactsLocation)
 import           Development.IDE.GHC.Compat
 

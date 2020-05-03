@@ -54,8 +54,7 @@ import System.IO
 import System.Exit
 import HIE.Bios.Environment (addCmdOpts)
 import Paths_ghcide
-import Development.GitRev
-import Development.Shake (Action,  action)
+import Development.Shake (Action)
 import qualified Data.HashSet as HashSet
 import qualified Data.HashMap.Strict as HM
 import qualified Data.Map.Strict as Map
@@ -73,8 +72,7 @@ import GhcMonad
 import HscTypes (HscEnv(..), ic_dflags)
 import DynFlags (PackageFlag(..), PackageArg(..))
 import GHC hiding (def)
-import           GHC.Check                      (runTimeVersion, compileTimeVersionFromLibdir)
-import Debug.Trace
+import           GHC.Check                      (runTimeVersion)
 
 import           HIE.Bios.Cradle
 import           HIE.Bios.Types

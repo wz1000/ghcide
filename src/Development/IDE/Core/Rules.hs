@@ -30,18 +30,15 @@ module Development.IDE.Core.Rules(
     ) where
 
 import Fingerprint
-import Outputable hiding ((<>))
 
 import Data.Binary
 import Util
-import Data.Bifunctor (second)
 import Control.Monad.Extra
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Maybe
 import Development.IDE.Core.Compile
 import Development.IDE.Core.OfInterest
 import Development.IDE.Types.Options
-import Development.IDE.Spans.Calculate
 import Development.IDE.Spans.Documentation
 import Development.IDE.Import.DependencyInformation
 import Development.IDE.Import.FindImports
@@ -53,20 +50,17 @@ import Development.IDE.GHC.Compat hiding (parseModule, typecheckModule)
 import Development.IDE.GHC.Util
 import Development.IDE.GHC.WithDynFlags
 import Data.Either.Extra
-import qualified Development.IDE.Types.Logger as L
 import Data.Maybe
 import           Data.Foldable
 import qualified Data.IntMap.Strict as IntMap
 import Data.IntMap.Strict (IntMap)
 import Data.List
-import Data.Ord
 import qualified Data.Set                                 as Set
 import qualified Data.HashSet                             as HS
 import qualified Data.Text                                as T
 import           Development.IDE.GHC.Error
 import           Development.Shake                        hiding (Diagnostic)
 import Development.IDE.Core.RuleTypes
-import Development.IDE.Spans.Type
 import qualified Data.ByteString.Char8 as BS
 import Development.IDE.Core.PositionMapping
 
@@ -91,7 +85,6 @@ import Control.Exception
 
 import           Language.Haskell.LSP.Types
 
-import System.IO
 -- | This is useful for rules to convert rules that can only produce errors or
 -- a result into the more general IdeResult type that supports producing
 -- warnings while also producing a result.

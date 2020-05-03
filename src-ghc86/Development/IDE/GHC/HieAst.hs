@@ -50,7 +50,6 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Data                  ( Data, Typeable )
 import Data.List                  (foldl',  foldl1' )
-import Data.Maybe                 ( listToMaybe )
 import Control.Monad.Trans.Reader
 import Control.Monad.Trans.Class  ( lift )
 
@@ -300,7 +299,7 @@ type family ProtectedSig a where
   ProtectedSig GhcTc = NoExt
 
 class ProtectSig a where
-  protectSig :: Scope -> LHsSigWcType (NoGhcTc a) -> ProtectedSig a
+  protectSig :: Scope -> XSigPat a -> ProtectedSig a
 
 instance (HasLoc a) => HasLoc (Shielded a) where
   loc (SH _ a) = loc a
@@ -348,8 +347,6 @@ instance HasLoc a => HasLoc [a] where
 
 instance (HasLoc a, HasLoc b) => HasLoc (FamEqn s a b) where
   loc (FamEqn _ a b _ c) = foldl1' combineSrcSpans [loc a, loc b, loc c]
-  loc (FamEqn _ a b _ c) = foldl1' combineSrcSpans
-                                              [loc a, loc b, loc c]
   loc _ = noSrcSpan
 {-
 instance (HasLoc tm, HasLoc ty) => HasLoc (HsArg tm ty) where
@@ -685,14 +682,12 @@ instance ( a ~ GhcPass p
       NPlusKPat _ n _ _ _ _ ->
         [ toHie $ C (PatternBind scope pscope rsp) n
         ]
-      SigPat _sig pat ->
+      SigPat sig pat ->
         [ toHie $ PS rsp scope pscope pat
-        {-
         , let cscope = mkLScope pat in
             toHie $ TS (ResolvedScopes [cscope, scope, pscope])
                        (protectSig @a cscope sig)
               -- See Note [Scoping Rules for SigPat]
-        -}
         ]
       CoPat _ _ _ _ ->
         []
@@ -1252,9 +1247,6 @@ instance ( ToHie pats
     , toHie pats
     , toHie rhs
     ]
-    where scope = combineScopes patsScope rhsScope
-          patsScope = mkScope (loc pats)
-          rhsScope = mkScope (loc rhs)
   toHie (XFamEqn _) = pure []
 
 instance ToHie (LInjectivityAnn GhcRn) where
@@ -1720,10 +1712,6 @@ instance ToHie (LRuleDecl GhcRn) where
         , toHie exprA
         , toHie exprB
         ]
-    where scope = bndrs_sc `combineScopes` exprA_sc `combineScopes` exprB_sc
-          bndrs_sc = maybe NoScope mkLScope (listToMaybe bndrs)
-          exprA_sc = mkLScope exprA
-          exprB_sc = mkLScope exprB
 
 instance ToHie (RScoped (LRuleBndr GhcRn)) where
   toHie (RS sc (L span bndr)) = concatM $ makeNode bndr span : case bndr of
