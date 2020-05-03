@@ -9,6 +9,7 @@ module Development.IDE.Spans.Type(
     SpansInfo(..)
   , SpanInfo(..)
   , SpanSource(..)
+  , DocMap
   , getNameM
   ) where
 
@@ -17,6 +18,9 @@ import Control.DeepSeq
 import OccName
 import Development.IDE.GHC.Util
 import Development.IDE.Spans.Common
+import Data.Map (Map)
+
+type DocMap = Map Name SpanDoc
 
 data SpansInfo =
   SpansInfo { spansExprs       :: [SpanInfo]

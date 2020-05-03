@@ -91,6 +91,15 @@ instance Show PRefMap where
 
 type instance RuleResult GetRefMap = PRefMap
 
+newtype PDocMap = PDocMap {getDocMap :: DocMap}
+instance NFData PDocMap where
+    rnf = rwhnf
+
+instance Show PDocMap where
+    show = const "docmap"
+
+type instance RuleResult GetDocMap = PDocMap
+
 -- | Convert to Core, requires TypeCheck*
 type instance RuleResult GenerateCore = (SafeHaskellMode, CgGuts, ModDetails)
 
@@ -173,6 +182,12 @@ data GetRefMap = GetRefMap
 instance Hashable GetRefMap
 instance NFData   GetRefMap
 instance Binary   GetRefMap
+
+data GetDocMap = GetDocMap
+    deriving (Eq, Show, Typeable, Generic)
+instance Hashable GetDocMap
+instance NFData   GetDocMap
+instance Binary   GetDocMap
 
 data GenerateCore = GenerateCore
     deriving (Eq, Show, Typeable, Generic)

@@ -42,6 +42,7 @@ import Development.IDE.Core.Compile
 import Development.IDE.Core.OfInterest
 import Development.IDE.Types.Options
 import Development.IDE.Spans.Calculate
+import Development.IDE.Spans.Documentation
 import Development.IDE.Import.DependencyInformation
 import Development.IDE.Import.FindImports
 import           Development.IDE.Core.FileExists
@@ -127,9 +128,12 @@ getAtPoint :: NormalizedFilePath -> Position -> IdeAction (Maybe (Maybe Range, [
 getAtPoint file pos = fmap join $ runMaybeT $ do
   ide <- ask
   opts <- liftIO $ getIdeOptionsIO ide
+
   (hf, mapping) <- useE GetHieFile file
+  (PDocMap dm,_) <- useE GetDocMap file
+
   !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
-  return $ AtPoint.atPoint opts hf pos'
+  return $ AtPoint.atPoint opts hf dm pos'
 
 -- | Goto Definition.
 getDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe Location)
@@ -148,13 +152,9 @@ getTypeDefinition file pos = runMaybeT $ do
 
 highlightAtPoint :: NormalizedFilePath -> Position -> IdeAction (Maybe [DocumentHighlight])
 highlightAtPoint file pos = runMaybeT $ do
-    liftIO $ hPutStrLn stderr "here0"
     hf <- fst <$> useE GetHieFile file
-    liftIO $ hPutStrLn stderr "here1"
     (PRefMap rf,mapping) <- useE GetRefMap file
-    liftIO $ hPutStrLn stderr "here2"
     !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
-    liftIO $ hPutStrLn stderr "here3"
     AtPoint.documentHighlight hf rf pos'
 
 getHieFile
@@ -445,12 +445,18 @@ getHieFileRule =
 getRefMapRule :: Rules ()
 getRefMapRule =
     define $ \GetRefMap file -> do
-      liftIO $ hPutStrLn stderr "here ref0"
       hf <- use_ GetHieFile file
-      liftIO $ hPutStrLn stderr "here ref1"
       let asts = hie_asts hf
           refmap = generateReferencesMap $ getAsts asts
       return ([],Just $ PRefMap refmap)
+
+getDocMapRule :: Rules ()
+getDocMapRule =
+    define $ \GetDocMap file -> do
+      PRefMap rf <- use_ GetRefMap file
+      hsc  <- hscEnv <$> use_ GhcSession file
+      docMap <- liftIO $ evalGhcEnv hsc $ mkDocMap [] rf
+      return ([],Just $ PDocMap docMap)
 
 -- Typechecks a module.
 typeCheckRule :: Rules ()
@@ -687,6 +693,7 @@ mainRule = do
     typeCheckRule
     getHieFileRule
     getRefMapRule
+    getDocMapRule
     generateCoreRule
     generateByteCodeRule
     loadGhcSession
