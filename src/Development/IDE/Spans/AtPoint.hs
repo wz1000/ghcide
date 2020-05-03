@@ -91,28 +91,27 @@ atPoint IdeOptions{} hf dm pos = listToMaybe $ pointCommand hf pos hoverInfo
   where
     -- Hover info for values/data
     hoverInfo ast =
-      (Just range, wrapHaskell prettyNames : docs ++ [wrapHaskell prettyTypes])
+      (Just range, prettyNames ++ map wrapHaskell prettyTypes)
       where
         range = srcSpanToRange (RealSrcSpan $ nodeSpan ast)
-
-        docs :: [T.Text]
-        docs = concat $ do
-          (Right n,_) <- names
-          maybeToList $ spanDocToMarkdown <$> M.lookup n dm
 
         wrapHaskell x = "\n```haskell\n"<>x<>"\n```\n"
         info = nodeInfo ast
         names = M.assocs $ nodeIdentifiers info
         types = nodeType info
 
-        prettyNames :: T.Text
-        prettyNames = T.unlines $ map prettyName names
-        prettyName (Right n, dets) =
-          showName n <> maybe "" (" :: " <> ) (prettyType <$> identType dets)
+        prettyNames :: [T.Text]
+        prettyNames = map prettyName names
+        prettyName (Right n, dets) = T.unlines $
+          wrapHaskell (showName n <> maybe "" (" :: " <> ) (prettyType <$> identType dets))
+          : definedAt n
+          : concat (maybeToList (spanDocToMarkdown <$> M.lookup n dm))
         prettyName (Left m,_) = showName m
 
-        prettyTypes = T.unlines $ map (("_ :: "<>) . prettyType) types
+        prettyTypes = map (("_ :: "<>) . prettyType) types
         prettyType t = showName $ hieTypeToIface $ recoverFullType t arr
+
+        definedAt name = "*Defined " <> T.pack (showSDocUnsafe $ pprNameDefnLoc name) <> "*"
 
         arr = hie_types hf
 
