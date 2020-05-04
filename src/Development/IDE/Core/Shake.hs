@@ -56,7 +56,8 @@ module Development.IDE.Core.Shake(
     OnDiskRule(..),
     WithProgressFunc, WithIndefiniteProgressFunc,
     delay, DelayedAction, mkDelayedAction,
-    IdeAction(..), runIdeAction
+    IdeAction(..), runIdeAction,
+    mkUpdater
     ) where
 
 import           Development.Shake hiding (ShakeValue, doesFileExist, Info)
@@ -75,6 +76,8 @@ import qualified Data.Text as T
 import Data.Tuple.Extra
 import Data.Unique
 import Development.IDE.Core.Debouncer
+import Development.IDE.GHC.Compat ( NameCacheUpdater(..), upNameCache )
+import Development.IDE.Core.RuleTypes
 import Development.IDE.Core.PositionMapping
 import Development.IDE.Types.Logger hiding (Priority)
 import qualified Development.IDE.Types.Logger as Logger
@@ -104,8 +107,13 @@ import Language.Haskell.LSP.Types
 import Data.Foldable (traverse_)
 import Control.Monad.IO.Class
 import Control.Monad.Reader
+import Control.Monad.Trans.Maybe
 import Data.Traversable
 
+import Data.IORef
+import NameCache
+import UniqSupply
+import PrelInfo
 
 -- information we stash inside the shakeExtra field
 data ShakeExtras = ShakeExtras
@@ -139,6 +147,7 @@ data ShakeExtras = ShakeExtras
     ,withIndefiniteProgress :: WithIndefiniteProgressFunc
     -- ^ Same as 'withProgress', but for processes that do not report the percentage complete
     ,restartShakeSession :: [DelayedAction ()] -> IO ()
+    , ideNc :: IORef NameCache
     }
 
 type WithProgressFunc = forall a.
@@ -378,6 +387,8 @@ shakeOpen getLspId eventer withProgress withIndefiniteProgress logger debouncer
   shakeProfileDir (IdeReportProgress reportProgress) ideTesting opts rules = mdo
 
     inProgress <- newVar HMap.empty
+    us <- mkSplitUniqSupply 'r'
+    ideNc <- newIORef (initNameCache us knownKeyNames)
     shakeExtras <- do
         globals <- newVar HMap.empty
         state <- newVar HMap.empty
@@ -729,6 +740,11 @@ runIdeAction _herald s i = do
 
 askShake :: IdeAction ShakeExtras
 askShake = ask
+
+mkUpdater :: MaybeT IdeAction NameCacheUpdater
+mkUpdater = do
+  ref <- lift $ ideNc <$> askShake
+  pure $ NCU (upNameCache ref)
 
 -- | A (maybe) stale result now, and an up to date one later
 data FastResult a = FastResult { stale :: Maybe (a,PositionMapping), uptoDate :: IO (Maybe a)  }
