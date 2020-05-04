@@ -47,7 +47,8 @@ module Development.IDE.Core.Shake(
     OnDiskRule(..),
 
     workerThread, delay, DelayedAction, mkDelayedAction,
-    IdeAction(..), runIdeAction, askShake
+    IdeAction(..), runIdeAction, askShake,
+    HieWriterChan
     ) where
 
 import           Development.Shake hiding (ShakeValue, doesFileExist, Info)
@@ -103,6 +104,10 @@ import NameCache
 import UniqSupply
 import PrelInfo
 
+import HieDb.Types
+
+type HieWriterChan = Chan (HieDb -> IO ())
+
 -- information we stash inside the shakeExtra field
 data ShakeExtras = ShakeExtras
     {eventer :: LSP.FromServerMessage -> IO ()
@@ -124,6 +129,8 @@ data ShakeExtras = ShakeExtras
     -- ^ How many rules are running for each file
     , queue :: ShakeQueue
     , ideNc :: IORef NameCache
+    , hiedb :: HieDb -- ^ Use only to read
+    , hiedbChan :: HieWriterChan -- ^ use to write
     }
 
 getShakeExtras :: Action ShakeExtras
@@ -522,10 +529,12 @@ shakeOpen :: IO LSP.LspId
           -> Debouncer NormalizedUri
           -> Maybe FilePath
           -> IdeReportProgress
+          -> HieDb
+          -> Chan (HieDb -> IO ())
           -> ShakeOptions
           -> Rules ()
           -> IO IdeState
-shakeOpen getLspId eventer logger debouncer shakeProfileDir (IdeReportProgress reportProgress) opts rules = do
+shakeOpen getLspId eventer logger debouncer shakeProfileDir (IdeReportProgress reportProgress) hiedb hiedbChan opts rules = do
     inProgress <- newVar HMap.empty
     shakeAbort <- newMVar $ return ()
     shakeQueue <- newShakeQueue
