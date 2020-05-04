@@ -20,6 +20,7 @@ import           Data.Text                      ( Text
                                                 )
 import qualified Data.Text                     as T
 import           Development.IDE.Core.Rules
+import           Development.IDE.Core.RuleTypes
 import           Development.IDE.Core.Shake
 import           Development.IDE.GHC.Compat
 import           Development.IDE.GHC.Error      ( realSrcSpanToRange )
@@ -43,7 +44,7 @@ moduleOutline _lsp ideState DocumentSymbolParams { _textDocument = TextDocumentI
       mb_decls <- fmap fst <$> runIdeAction "Outline" (shakeExtras ideState) (useWithStaleFast GetParsedModule fp)
       pure $ Right $ case mb_decls of
         Nothing -> DSDocumentSymbols (List [])
-        Just ParsedModule { pm_parsed_source = L _ltop HsModule { hsmodName, hsmodDecls, hsmodImports } }
+        Just (ParsedModule { pm_parsed_source = L _ltop HsModule { hsmodName, hsmodDecls, hsmodImports } })
           -> let
                declSymbols  = mapMaybe documentSymbolForDecl hsmodDecls
                moduleSymbol = hsmodName <&> \(L (RealSrcSpan l) m) ->

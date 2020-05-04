@@ -52,6 +52,7 @@ library
         hashable,
         haskell-lsp-types == 0.22.*,
         haskell-lsp == 0.22.*,
+        hiedb,
         mtl,
         network-uri,
         prettyprinter-ansi-terminal,
@@ -262,6 +263,13 @@ executable ghcide
                 "-with-rtsopts=-I0 -qg -A128M"
     main-is: Main.hs
     build-depends:
+        time,
+        async,
+        bytestring,
+        base16-bytestring,
+        cryptohash-sha1,
+        hslogger,
+        hiedb,
         aeson,
         base == 4.*,
         data-default,
@@ -269,6 +277,7 @@ executable ghcide
         extra,
         filepath,
         gitrev,
+        ghc,
         hashable,
         haskell-lsp,
         haskell-lsp-types,
@@ -277,7 +286,8 @@ executable ghcide
         lens,
         optparse-applicative,
         text,
-        unordered-containers
+        unordered-containers,
+        sqlite-simple
     other-modules:
         Arguments
         Paths_ghcide

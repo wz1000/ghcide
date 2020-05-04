@@ -31,16 +31,25 @@ import Var
 import qualified Documentation.Haddock.Parser as H
 import qualified Documentation.Haddock.Types as H
 
+import HieDb (dynFlagsForPrinting)
+import System.IO.Unsafe
+
 type DocMap = Map Name SpanDoc
 
 showGhc :: Outputable a => a -> String
-showGhc = showPpr unsafeGlobalDynFlags
+showGhc = showPpr printDynFlags
 
 showName :: Outputable a => a -> T.Text
-showName = T.pack . prettyprint
+showName = showSD . ppr
+
+showSD :: SDoc -> T.Text
+showSD = T.pack . prettyprint
   where
-    prettyprint x = renderWithStyle unsafeGlobalDynFlags (ppr x) style
-    style = mkUserStyle unsafeGlobalDynFlags neverQualify AllTheWay
+    prettyprint x = renderWithStyle printDynFlags x style
+    style = mkUserStyle printDynFlags neverQualify AllTheWay
+
+printDynFlags :: DynFlags
+printDynFlags = unsafePerformIO dynFlagsForPrinting
 
 -- From haskell-ide-engine/src/Haskell/Ide/Engine/Support/HieExtras.hs
 safeTyThingType :: TyThing -> Maybe Type

@@ -22,6 +22,7 @@ import qualified Data.Set as S
 import qualified Data.Map as M
 import           Development.Shake
 import           GHC.Generics                             (Generic)
+import           Data.ByteString (ByteString)
 
 import Module (InstalledUnitId)
 import HscTypes (hm_iface, CgGuts, Linkable, HomeModInfo, ModDetails)

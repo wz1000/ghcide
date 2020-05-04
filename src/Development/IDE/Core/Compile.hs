@@ -20,6 +20,7 @@ module Development.IDE.Core.Compile
   , generateByteCode
   , generateAndWriteHieFile
   , writeHiFile
+  , addHieFileToDb
   , getModSummaryFromImports
   , loadHieFile
   , loadInterface
@@ -41,6 +42,10 @@ import Development.IDE.GHC.Util
 import qualified GHC.LanguageExtensions.Type as GHC
 import Development.IDE.Types.Options
 import Development.IDE.Types.Location
+import Outputable
+import Control.Concurrent.Chan
+
+import HieDb
 
 #if MIN_GHC_API_VERSION(8,6,0)
 import DynamicLoading (initializePlugins)
@@ -68,6 +73,7 @@ import           TcRnMonad (tct_id, TcTyThing(AGlobal, ATcId), initTc, initIface
 import           TcIface                        (typecheckIface)
 import           TidyPgm
 
+import Data.ByteString (ByteString)
 import Control.Exception.Safe
 import Control.Monad.Extra
 import Control.Monad.Except
@@ -280,14 +286,23 @@ atomicFileWrite targetPath write = do
   (tempFilePath, cleanUp) <- newTempFileWithin dir
   (write tempFilePath >> renameFile tempFilePath targetPath) `onException` cleanUp
 
-generateAndWriteHieFile :: HscEnv -> TypecheckedModule -> IO ([FileDiagnostic],Maybe Compat.HieFile)
-generateAndWriteHieFile hscEnv tcm =
+addHieFileToDb :: HieWriterChan -> FilePath -> Bool -> Maybe FilePath -> Compat.HieFile -> DeclDocMap -> IO ()
+addHieFileToDb hiechan targetPath isBoot srcPath hf docs = do
+  writeChan hiechan $ \db -> do
+    atomicFileWrite targetPath $ flip GHC.writeHieFile hf
+    time <- getModificationTime targetPath
+    hPutStrLn stderr $ "Started indexing .hie file: " ++ targetPath ++ " for: " ++ show srcPath
+    addRefsFromLoaded db targetPath isBoot srcPath time hf docs
+    hPutStrLn stderr $ "Finished indexing .hie file: " ++ targetPath
+
+generateAndWriteHieFile :: HscEnv -> HieWriterChan -> TypecheckedModule -> ByteString -> DeclDocMap -> IO ([FileDiagnostic],Maybe Compat.HieFile)
+generateAndWriteHieFile hscEnv hiechan tcm contents docs =
   handleGenerationErrors dflags "extended interface generation" $ do
     case tm_renamed_source tcm of
       Just rnsrc -> do
         hf <- runHsc hscEnv $
-          GHC.mkHieFile mod_summary (fst $ tm_internals_ tcm) rnsrc ""
-        atomicFileWrite targetPath $ flip GHC.writeHieFile hf
+          GHC.mkHieFile mod_summary (fst $ tm_internals_ tcm) rnsrc contents
+        addHieFileToDb hiechan targetPath isBoot path hf docs
         pure (Just hf)
       _ ->
         return Nothing
@@ -296,6 +311,10 @@ generateAndWriteHieFile hscEnv tcm =
     mod_summary  = pm_mod_summary $ tm_parsed_module tcm
     mod_location = ms_location mod_summary
     targetPath   = Compat.ml_hie_file mod_location
+    path         = ml_hs_file mod_location
+    isBoot = case ms_hsc_src mod_summary of
+      HsBootFile -> True
+      _ -> False
 
 writeHiFile :: HscEnv -> TcModuleResult -> IO [FileDiagnostic]
 writeHiFile hscEnv tc =
