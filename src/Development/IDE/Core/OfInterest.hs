@@ -25,6 +25,7 @@ import qualified Data.HashMap.Strict as HashMap
 import qualified Data.Text as T
 import Data.Tuple.Extra
 import Development.Shake
+import Control.Monad
 
 import Development.IDE.Types.Exports
 import Development.IDE.Types.Location
@@ -101,4 +102,5 @@ kick = mkDelayedAction "kick" Debug $ do
         !exportsMap' = createExportsMap modIfaces
     liftIO $ modifyVar_ exportsMap $ evaluate . (exportsMap' <>)
 
+    void $ uses TypeCheck $ HashMap.keys files
     liftIO $ progressUpdate KickCompleted

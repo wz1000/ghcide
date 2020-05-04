@@ -3,7 +3,7 @@
 {-|
 The logic for setting up a ghcide session by tapping into hie-bios.
 -}
-module Development.IDE.Session (loadSession) where
+module Development.IDE.Session (loadSession, cacheDir) where
 
 -- Unfortunately, we cannot use loadSession with ghc-lib since hie-bios uses
 -- the real GHC library and the types are incompatible. Furthermore, when

@@ -90,8 +90,8 @@ getDocumentationsTryGhc _ sources names = mapM mkSpanDocText names
             src <- toFileUriText $ lookupSrcHtmlForModule df mod
             return (doc, src)
           Nothing -> pure (Nothing, Nothing)
-      let docUri = (<> "#" <> selector <> showName name) <$> docFu
-          srcUri = (<> "#" <> showName name) <$> srcFu
+      let docUri = (<> "#" <> selector <> showGhc name) <$> docFu
+          srcUri = (<> "#" <> showGhc name) <$> srcFu
           selector
             | isValName name = "v:"
             | otherwise = "t:"

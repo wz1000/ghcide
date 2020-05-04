@@ -2,9 +2,15 @@
 -- SPDX-License-Identifier: Apache-2.0
 {-# OPTIONS_GHC -Wno-dodgy-imports #-} -- GHC no longer exports def in GHC 8.6 and above
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE CPP #-}
+#include "ghc-api-version.h"
 
 module Main(main) where
 
+import Linker (initDynLinker)
+import Data.IORef
+import Packages
+import Module
 import Arguments
 import Control.Concurrent.Extra
 import Control.Monad.Extra
@@ -50,6 +56,30 @@ import qualified Data.Aeson as J
 
 import HIE.Bios.Cradle
 
+import Debug.Trace
+import NameCache
+
+import HieDb.Create
+import HieDb.Types
+import HieDb.Utils
+import Database.SQLite.Simple
+import qualified Data.ByteString.Char8 as B
+import qualified Crypto.Hash.SHA1 as H
+import Control.Concurrent.Async
+import Control.Exception
+import System.Directory
+import Data.ByteString.Base16
+import HieDb.Run (Options(..), runCommand)
+import Maybes (MaybeT(runMaybeT))
+import HIE.Bios.Types (CradleLoadResult(..))
+import HIE.Bios.Environment (getRuntimeGhcLibDir)
+import DynFlags
+import qualified Data.HashMap.Strict as HashMap
+
+--import Rules
+--import RuleTypes
+--
+
 ghcideVersion :: IO String
 ghcideVersion = do
   path <- getExecutablePath
@@ -61,6 +91,33 @@ ghcideVersion = do
              <> ") (PATH: " <> path <> ")"
              <> gitHashSection
 
+runWithDb :: Maybe DynFlags -> FilePath -> (HieDb -> HieWriterChan -> IO ()) -> IO ()
+runWithDb df fp k =
+  withHieDb fp $ \writedb' -> do
+    let writedb = writedb' { getDbDynFlags = df }
+    execute_ (getConn writedb) "PRAGMA journal_mode=WAL;"
+    -- setTrace (getConn writedb) (Just $ T.appendFile "/tmp/sqltrace" . (<>"\n"))
+    initConn writedb
+    chan <- newChan
+    race_ (writerThread writedb chan) $ withHieDb fp $ \readdb' -> do
+      let readdb = readdb' { getDbDynFlags = df }
+      -- setTrace (getConn readdb) (Just $ T.appendFile "/tmp/sqltrace" . (<>"\n"))
+      k readdb chan
+  where
+    writerThread db chan =forever $ do
+      k <- readChan chan
+      k db `catch` \e@SQLError{} -> do
+        hPutStrLn stderr $ "Error in worker, ignoring: " ++ show e
+        exitWith $ ExitFailure 1
+
+getHieDbLoc :: FilePath -> IO FilePath
+getHieDbLoc dir = do
+  let db = (dirHash++"-"++takeBaseName dir++"-"++VERSION_ghc <.> "hiedb")
+      dirHash = B.unpack $ encode $ H.hash $ B.pack dir
+  cDir <- IO.getXdgDirectory IO.XdgCache cacheDir
+  createDirectoryIfMissing True cDir
+  pure (cDir </> db)
+
 main :: IO ()
 main = do
     -- WARNING: If you write to stdout before runLanguageServer
@@ -70,15 +127,44 @@ main = do
     if argsVersion then ghcideVersion >>= putStrLn >> exitSuccess
     else hPutStrLn stderr {- see WARNING above -} =<< ghcideVersion
 
+    whenJust argsCwd IO.setCurrentDirectory
+
+    dir <- IO.getCurrentDirectory
+    dbLoc <- getHieDbLoc dir
+    hieYaml <- runMaybeT $ yamlConfig dir
+    cradle <- maybe (loadImplicitCradle $ addTrailingPathSeparator dir) loadCradle hieYaml
+    libDirRes <- getRuntimeGhcLibDir cradle
+    libdir <- case libDirRes of
+        CradleSuccess libdir -> pure $ Just libdir
+        CradleFail err -> do
+          hPutStrLn stderr $ "Couldn't load cradle for libdir: " ++ show err
+          return Nothing
+        CradleNone -> return Nothing
+    dynFlags <- mapM dynFlagsForPrinting libdir
+    mapM_ setUnsafeGlobalDynFlags dynFlags
+    case argFilesOrCmd of
+      DbCmd cmd -> do
+        let opts :: Options
+            opts = Options
+              { database = dbLoc
+              , trace = False
+              , quiet = False
+              , virtualFile = False
+              }
+        runCommand (fromJust libdir) opts cmd
+      Typecheck (Just -> argFilesOrCmd) | not argLSP -> runWithDb dynFlags dbLoc $ runIde dir Arguments{..}
+      _ -> let argFilesOrCmd = Nothing in runWithDb dynFlags dbLoc $ runIde dir Arguments{..}
+
+
+runIde :: FilePath -> Arguments' (Maybe [FilePath]) -> HieDb -> HieWriterChan -> IO ()
+runIde dir Arguments{..} hiedb hiechan = do
+    command <- makeLspCommandId "typesignature.add"
+
     -- lock to avoid overlapping output on stdout
     lock <- newLock
     let logger p = Logger $ \pri msg -> when (pri >= p) $ withLock lock $
             T.putStrLn $ T.pack ("[" ++ upper (show pri) ++ "] ") <> msg
 
-    whenJust argsCwd IO.setCurrentDirectory
-
-    dir <- IO.getCurrentDirectory
-    command <- makeLspCommandId "typesignature.add"
 
     let plugins = Completions.plugin <> CodeAction.plugin
         onInitialConfiguration :: InitializeRequest -> Either T.Text LspConfig
@@ -91,8 +177,8 @@ main = do
         options = def { LSP.executeCommandCommands = Just [command]
                       , LSP.completionTriggerCharacters = Just "."
                       }
-
-    if argLSP then do
+    case argFilesOrCmd of
+      Nothing -> do
         t <- offsetTime
         hPutStrLn stderr "Starting LSP server..."
         hPutStrLn stderr "If you are seeing this in a terminal, you probably should have run ghcide WITHOUT the --lsp option!"
@@ -112,8 +198,8 @@ main = do
                 logLevel = if argsVerbose then minBound else Info
             debouncer <- newAsyncDebouncer
             initialise caps (mainRule >> pluginRules plugins)
-                getLspId event wProg wIndefProg (logger logLevel) debouncer options vfs
-    else do
+                getLspId event wProg wIndefProg (logger logLevel) debouncer options vfs hiedb hiechan
+      Just argFiles -> do
         -- GHC produces messages with UTF8 in them, so make sure the terminal doesn't error
         hSetEncoding stdout utf8
         hSetEncoding stderr utf8
@@ -139,7 +225,7 @@ main = do
         let logLevel = if argsVerbose then minBound else Info
             dummyWithProg _ _ f = f (const (pure ()))
         sessionLoader <- loadSession dir
-        ide <- initialise def mainRule (pure $ IdInt 0) (showEvent lock) dummyWithProg (const (const id)) (logger logLevel) debouncer (defaultIdeOptions sessionLoader)  vfs
+        ide <- initialise def mainRule (pure $ IdInt 0) (showEvent lock) dummyWithProg (const (const id)) (logger logLevel) debouncer (defaultIdeOptions sessionLoader) vfs hiedb hiechan
 
         putStrLn "\nStep 4/4: Type checking the files"
         setFilesOfInterest ide $ HashMap.fromList $ map ((, OnDisk) . toNormalizedFilePath') files

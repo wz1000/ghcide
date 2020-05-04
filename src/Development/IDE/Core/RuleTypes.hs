@@ -23,6 +23,7 @@ import qualified Data.HashSet                             as HS
 import qualified Data.Map as M
 import           Development.Shake
 import           GHC.Generics                             (Generic)
+import           Data.ByteString (ByteString)
 
 import Module (InstalledUnitId)
 import HscTypes (hm_iface, CgGuts, Linkable, HomeModInfo, ModDetails)
@@ -67,7 +68,7 @@ data TcModuleResult = TcModuleResult
     -- HomeModInfo instead
     , tmrModInfo    :: HomeModInfo
     , tmrDeferedError :: !Bool -- ^ Did we defer any type errors for this module?
-    , tmrHieFile    :: Maybe HieFile
+    , tmrHieFile    :: HieFile
     }
 instance Show TcModuleResult where
     show = show . pm_mod_summary . tm_parsed_module . tmrModule
@@ -113,15 +114,6 @@ instance Show HieFileResult where
 
 -- | Information about what spans occur where, requires TypeCheck
 type instance RuleResult GetHieFile = HieFileResult
-
-newtype PDocMap = PDocMap {getDocMap :: DocMap}
-instance NFData PDocMap where
-    rnf = rwhnf
-
-instance Show PDocMap where
-    show = const "docmap"
-
-type instance RuleResult GetDocMap = PDocMap
 
 -- | Convert to Core, requires TypeCheck*
 type instance RuleResult GenerateCore = (SafeHaskellMode, CgGuts, ModDetails)

@@ -18,8 +18,9 @@ module Development.IDE.Core.Compile
   , addRelativeImport
   , mkTcModuleResult
   , generateByteCode
-  , generateAndWriteHieFile
+  , writeAndIndexHieFile
   , writeHiFile
+  , indexHieFile
   , getModSummaryFromImports
   , loadHieFile
   , loadInterface
@@ -35,12 +36,17 @@ import Development.IDE.Core.Preprocessor
 import Development.IDE.Core.Shake
 import Development.IDE.GHC.Error
 import Development.IDE.GHC.Warnings
+import Development.IDE.Spans.Common
 import Development.IDE.Types.Diagnostics
 import Development.IDE.GHC.Orphans()
 import Development.IDE.GHC.Util
 import qualified GHC.LanguageExtensions.Type as GHC
 import Development.IDE.Types.Options
 import Development.IDE.Types.Location
+import Outputable
+import Control.Concurrent.Chan
+
+import HieDb
 
 #if MIN_GHC_API_VERSION(8,6,0)
 import DynamicLoading (initializePlugins)
@@ -68,6 +74,7 @@ import           TcRnMonad (tct_id, TcTyThing(AGlobal, ATcId), initTc, initIface
 import           TcIface                        (typecheckIface)
 import           TidyPgm
 
+import Data.ByteString (ByteString)
 import Control.Exception.Safe
 import Control.Monad.Extra
 import Control.Monad.Except
@@ -87,6 +94,13 @@ import Exception (ExceptionMonad)
 import TcEnv (tcLookup)
 import Data.Time (UTCTime)
 
+import           Avail     (availsToNameSet)
+import           ConLike   (ConLike (PatSynCon))
+import           InstEnv   (updateClsInstDFun)
+import           PatSyn    (PatSyn, updatePatSynIds)
+import           TcRnTypes (TcGblEnv (TcGblEnv, tcg_exports, tcg_fam_insts, tcg_insts, tcg_keep, tcg_patsyns, tcg_tcs, tcg_type_env))
+import Control.Concurrent.Extra (modifyVar_,modifyVar)
+import qualified Data.HashSet as HashSet
 
 -- | Given a string buffer, return the string (after preprocessing) and the 'ParsedModule'.
 parseModule
@@ -269,9 +283,12 @@ mkTcModuleResult tcm upgradedError = do
     (iface, _) <- liftIO $ mkIfaceTc session Nothing sf details tcGblEnv
 #endif
     let mod_info = HomeModInfo iface details Nothing
-    return $ TcModuleResult tcm mod_info upgradedError Nothing
+    let rnsrc = fromMaybe (error "typecheckModule didn't return renamed source") $ tm_renamed_source tcm
+    hf <- liftIO $ runHsc session $ GHC.mkHieFile mod_summary (fst $ tm_internals_ tcm) rnsrc ""
+    return $ TcModuleResult tcm mod_info upgradedError hf
   where
     (tcGblEnv, details) = tm_internals_ tcm
+    mod_summary  = pm_mod_summary $ tm_parsed_module tcm
 
 atomicFileWrite :: FilePath -> (FilePath -> IO a) -> IO ()
 atomicFileWrite targetPath write = do
@@ -280,39 +297,49 @@ atomicFileWrite targetPath write = do
   (tempFilePath, cleanUp) <- newTempFileWithin dir
   (write tempFilePath >> renameFile tempFilePath targetPath) `onException` cleanUp
 
-generateAndWriteHieFile :: HscEnv -> TypecheckedModule -> IO ([FileDiagnostic],Maybe Compat.HieFile)
-generateAndWriteHieFile hscEnv tcm =
-  handleGenerationErrors dflags "extended interface generation" $ do
-    case tm_renamed_source tcm of
-      Just rnsrc -> do
-        hf <- runHsc hscEnv $
-          GHC.mkHieFile mod_summary (fst $ tm_internals_ tcm) rnsrc ""
-        atomicFileWrite targetPath $ flip GHC.writeHieFile hf
-        pure (Just hf)
-      _ ->
-        return Nothing
+indexHieFile :: HieDbWriter -> ModSummary -> NormalizedFilePath -> Compat.HieFile -> DeclDocMap -> IO ()
+indexHieFile dbwriter mod_summary srcPath hf docs = do
+  index <- modifyVar (pendingIndexes dbwriter) $ \pending -> pure $
+    if HashSet.member srcPath pending
+      then (pending,False)
+      else (HashSet.insert srcPath pending, True)
+  when index $ writeChan (channel dbwriter) $ \db -> do
+    hPutStrLn stderr $ "Started indexing .hie file: " ++ targetPath ++ " for: " ++ show srcPath
+    addRefsFromLoaded db targetPath isBoot (Just $ fromNormalizedFilePath srcPath) modtime hf docs
+    modifyVar_ (pendingIndexes dbwriter) (pure . HashSet.delete srcPath)
+    hPutStrLn stderr $ "Finished indexing .hie file: " ++ targetPath
   where
-    dflags       = hsc_dflags hscEnv
-    mod_summary  = pm_mod_summary $ tm_parsed_module tcm
+    modtime      = ms_hs_date mod_summary
+    mod_location = ms_location mod_summary
+    targetPath   = Compat.ml_hie_file mod_location
+    isBoot = case ms_hsc_src mod_summary of
+      HsBootFile -> True
+      _ -> False
+
+writeAndIndexHieFile :: DynFlags -> HieDbWriter -> ModSummary -> NormalizedFilePath -> HieFile -> DeclDocMap -> IO [FileDiagnostic]
+writeAndIndexHieFile dflags hiechan mod_summary srcPath hf docs =
+  handleWritingErrors dflags "extended interface write" $ do
+    atomicFileWrite targetPath $ flip GHC.writeHieFile hf
+    indexHieFile hiechan mod_summary srcPath hf docs
+  where
     mod_location = ms_location mod_summary
     targetPath   = Compat.ml_hie_file mod_location
 
 writeHiFile :: HscEnv -> TcModuleResult -> IO [FileDiagnostic]
 writeHiFile hscEnv tc =
-  fst <$> (handleGenerationErrors dflags "interface generation" $ do
+  handleWritingErrors dflags "interface write" $ do
     atomicFileWrite targetPath $ \fp ->
       writeIfaceFile dflags fp modIface
-    pure Nothing)
   where
     modIface = hm_iface $ tmrModInfo tc
     targetPath = ml_hi_file $ ms_location $ tmrModSummary tc
     dflags = hsc_dflags hscEnv
 
-handleGenerationErrors :: DynFlags -> T.Text -> IO (Maybe a) -> IO ([FileDiagnostic],Maybe a)
-handleGenerationErrors dflags source action =
-  (([],) <$> action) `catches`
-    [ Handler $ return . (,Nothing) . diagFromGhcException source dflags
-    , Handler $ return . (,Nothing) . diagFromString source DsError (noSpan "<internal>")
+handleWritingErrors :: DynFlags -> T.Text -> IO () -> IO [FileDiagnostic]
+handleWritingErrors dflags source action =
+  (const [] <$> action) `catches`
+    [ Handler $ return . diagFromGhcException source dflags
+    , Handler $ return . diagFromString source DsError (noSpan "<internal>")
     . (("Error during " ++ T.unpack source) ++) . show @SomeException
     ]
 
@@ -658,7 +685,7 @@ getDocsBatch _mod _names =
                else pure (Right ( Map.lookup name dmap
                                 , Map.findWithDefault Map.empty name amap))
     case res of
-        Just x -> return $ map (first prettyPrint) x
+        Just x -> return $ map (first $ T.unpack . showGhc) x
         Nothing -> throwErrors errs
   where
     throwErrors = liftIO . throwIO . mkSrcErr

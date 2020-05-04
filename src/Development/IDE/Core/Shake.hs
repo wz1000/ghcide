@@ -35,6 +35,7 @@ module Development.IDE.Core.Shake(
     use_, useNoFile_, uses_,
     useWithStale, usesWithStale,
     useWithStale_, usesWithStale_,
+    BadDependency(..),
     define, defineEarlyCutoff, defineOnDisk, needOnDisk, needOnDisks,
     getDiagnostics, unsafeClearDiagnostics,
     getHiddenDiagnostics,
@@ -61,6 +62,9 @@ module Development.IDE.Core.Shake(
     mkUpdater,
     -- Exposed for testing.
     Q(..),
+    HieWriterChan,
+    HieDbWriter(..),
+    addPersistentRule
     ) where
 
 import           Development.Shake hiding (ShakeValue, doesFileExist, Info)
@@ -121,6 +125,15 @@ import UniqSupply
 import PrelInfo
 import Data.Int (Int64)
 
+import HieDb.Types
+
+data HieDbWriter
+  = HieDbWriter
+  { channel :: HieWriterChan
+  , pendingIndexes :: Var (HSet.HashSet NormalizedFilePath)
+  }
+type HieWriterChan = Chan (HieDb -> IO ())
+
 -- information we stash inside the shakeExtra field
 data ShakeExtras = ShakeExtras
     {eventer :: LSP.FromServerMessage -> IO ()
@@ -157,6 +170,9 @@ data ShakeExtras = ShakeExtras
     ,exportsMap :: Var ExportsMap
     -- | A work queue for actions added via 'runInShakeSession'
     ,actionQueue :: ActionQueue
+    , hiedb :: HieDb -- ^ Use only to read
+    , hiedbWriter :: HieDbWriter -- ^ use to write
+    , persistentKeys :: Var (HMap.HashMap Key GetStalePersistent)
     }
 
 type WithProgressFunc = forall a.
@@ -168,6 +184,8 @@ data ProgressEvent
     = KickStarted
     | KickCompleted
 
+type GetStalePersistent = NormalizedFilePath -> IdeAction (Maybe Dynamic)
+
 getShakeExtras :: Action ShakeExtras
 getShakeExtras = do
     Just x <- getShakeExtra @ShakeExtras
@@ -177,6 +195,13 @@ getShakeExtrasRules :: Rules ShakeExtras
 getShakeExtrasRules = do
     Just x <- getShakeExtraRules @ShakeExtras
     return x
+
+addPersistentRule :: IdeRule k v => k -> (NormalizedFilePath -> IdeAction (Maybe v)) -> Rules ()
+addPersistentRule k getVal = do
+  ShakeExtras{persistentKeys} <- getShakeExtrasRules
+  liftIO $ modifyVar_ persistentKeys $ \hm -> do
+    pure $ HMap.insert (Key k) (\f -> fmap toDyn <$> getVal f) hm
+  return ()
 
 class Typeable a => IsIdeGlobal a where
 
@@ -241,7 +266,7 @@ getIdeOptionsIO ide = do
 data Value v
     = Succeeded TextDocumentVersion v
     | Stale TextDocumentVersion v
-    | Failed
+    | Failed Bool -- ^ did the persistent read fail
     deriving (Functor, Generic, Show)
 
 instance NFData v => NFData (Value v)
@@ -251,30 +276,44 @@ instance NFData v => NFData (Value v)
 currentValue :: Value v -> Maybe v
 currentValue (Succeeded _ v) = Just v
 currentValue (Stale _ _) = Nothing
-currentValue Failed = Nothing
+currentValue Failed{} = Nothing
 
 -- | Return the most recent, potentially stale, value and a PositionMapping
 -- for the version of that value.
-lastValueIO :: ShakeExtras -> NormalizedFilePath -> Value v -> IO (Maybe (v, PositionMapping))
-lastValueIO ShakeExtras{positionMapping} file v = do
-    allMappings <- liftIO $ readVar positionMapping
-    pure $ case v of
-        Succeeded ver v -> Just (v, mappingForVersion allMappings file ver)
-        Stale ver v -> Just (v, mappingForVersion allMappings file ver)
-        Failed -> Nothing
+lastValueIO :: IdeRule k v => ShakeExtras -> k -> NormalizedFilePath -> IO (Maybe (v, PositionMapping))
+lastValueIO s@ShakeExtras{positionMapping,persistentKeys,state} k file = do
+  modifyVar state $ \hm -> do
+    let readPersistent = do
+          pmap <- readVar persistentKeys
+          mv <- runMaybeT $ do
+            liftIO $ Logger.logInfo (logger s) $ T.pack $ "LOOKUP UP PERSISTENT FOR" ++ show k
+            f <- MaybeT $ pure $ HMap.lookup (Key k) pmap
+            dv <- MaybeT $ runIdeAction "lastValueIO" s $ f file
+            MaybeT $ pure $ fromDynamic dv
+          case mv of
+            Nothing -> pure (HMap.insert (file,Key k) (Failed True) hm,Nothing)
+            Just v -> pure (HMap.insert (file,Key k) (Stale Nothing (toDyn v)) hm, Just (v,zeroMapping))
+    allMappings <- readVar positionMapping
+    case HMap.lookup (file,Key k) hm of
+      Nothing -> readPersistent
+      Just v -> case v of
+        Succeeded ver (fromDynamic -> Just v) -> pure (hm, Just (v, mappingForVersion allMappings file ver))
+        Stale ver (fromDynamic -> Just v) -> pure (hm, Just (v, mappingForVersion allMappings file ver))
+        Failed p | not p -> readPersistent
+        _ -> pure (hm, Nothing)
 
 -- | Return the most recent, potentially stale, value and a PositionMapping
 -- for the version of that value.
-lastValue :: NormalizedFilePath -> Value v -> Action (Maybe (v, PositionMapping))
-lastValue file v = do
+lastValue :: IdeRule k v => k -> NormalizedFilePath -> Action (Maybe (v, PositionMapping))
+lastValue key file = do
     s <- getShakeExtras
-    liftIO $ lastValueIO s file v
+    liftIO $ lastValueIO s key file
 
 valueVersion :: Value v -> Maybe TextDocumentVersion
 valueVersion = \case
     Succeeded ver _ -> Just ver
     Stale ver _ -> Just ver
-    Failed -> Nothing
+    Failed _ -> Nothing
 
 mappingForVersion
     :: HMap.HashMap NormalizedUri (Map TextDocumentVersion (a, PositionMapping))
@@ -377,7 +416,7 @@ seqValue :: Value v -> b -> b
 seqValue v b = case v of
     Succeeded ver v -> rnf ver `seq` v `seq` b
     Stale ver v -> rnf ver `seq` v `seq` b
-    Failed -> b
+    Failed _ -> b
 
 -- | Open a 'IdeState', should be shut using 'shakeShut'.
 shakeOpen :: IO LSP.LspId
@@ -389,12 +428,13 @@ shakeOpen :: IO LSP.LspId
           -> Maybe FilePath
           -> IdeReportProgress
           -> IdeTesting
+          -> HieDb
+          -> Chan (HieDb -> IO ())
           -> ShakeOptions
           -> Rules ()
           -> IO IdeState
 shakeOpen getLspId eventer withProgress withIndefiniteProgress logger debouncer
-  shakeProfileDir (IdeReportProgress reportProgress) ideTesting@(IdeTesting testing) opts rules = mdo
-
+  shakeProfileDir (IdeReportProgress reportProgress) ideTesting@(IdeTesting testing) hiedb hiedbChan opts rules = mdo
     inProgress <- newVar HMap.empty
     us <- mkSplitUniqSupply 'r'
     ideNc <- newIORef (initNameCache us knownKeyNames)
@@ -409,7 +449,10 @@ shakeOpen getLspId eventer withProgress withIndefiniteProgress logger debouncer
         let restartShakeSession = shakeRestart ideState
         let session = shakeSession
         mostRecentProgressEvent <- newTVarIO KickCompleted
+        persistentKeys <- newVar HMap.empty
         let progressUpdate = atomically . writeTVar mostRecentProgressEvent
+        pendingIndexes <- newVar HSet.empty
+        let hiedbWriter = HieDbWriter hiedbChan pendingIndexes
         progressAsync <- async $
             when reportProgress $
                 progressThread mostRecentProgressEvent inProgress
@@ -706,10 +749,8 @@ runIdeAction _herald s i = runReaderT (runIdeActionT i) s
 askShake :: IdeAction ShakeExtras
 askShake = ask
 
-mkUpdater :: MaybeT IdeAction NameCacheUpdater
-mkUpdater = do
-  ref <- lift $ ideNc <$> askShake
-  pure $ NCU (upNameCache ref)
+mkUpdater :: IORef NameCache -> NameCacheUpdater
+mkUpdater ref = NCU (upNameCache ref)
 
 -- | A (maybe) stale result now, and an up to date one later
 data FastResult a = FastResult { stale :: Maybe (a,PositionMapping), uptoDate :: IO (Maybe a)  }
@@ -736,16 +777,16 @@ useWithStaleFast' key file = do
   liftIO $ case r of
     -- block for the result if we haven't computed before
     Nothing -> do
-      a <- wait
-      r <- getValues state key file
-      case r of
-        Nothing -> return $ FastResult Nothing (pure a)
-        Just v -> do
-          res <- lastValueIO s file v
-          pure $ FastResult res (pure a)
+      -- Check if we can get a stale value from disk
+      res <- lastValueIO s key file
+      case res of
+        Nothing -> do
+          a <- wait
+          pure $ FastResult ((,zeroMapping) <$> a) (pure a)
+        Just _ -> pure $ FastResult res wait
     -- Otherwise, use the computed value even if it's out of date.
-    Just v -> do
-      res <- lastValueIO s file v
+    Just _ -> do
+      res <- lastValueIO s key file
       pure $ FastResult res wait
 
 useNoFile :: IdeRule k v => k -> Action (Maybe v)
@@ -812,8 +853,8 @@ uses key files = map (\(A value) -> currentValue value) <$> apply (map (Q . (key
 usesWithStale :: IdeRule k v
     => k -> [NormalizedFilePath] -> Action [Maybe (v, PositionMapping)]
 usesWithStale key files = do
-    values <- map (\(A value) -> value) <$> apply (map (Q . (key,)) files)
-    zipWithM lastValue files values
+    _ <- apply (map (Q . (key,)) files)
+    mapM (lastValue key) files
 
 
 defineEarlyCutoff
@@ -844,11 +885,11 @@ defineEarlyCutoff op = addBuiltinRule noLint noIdentity $ \(Q (key, file)) (old 
                     Nothing -> do
                         staleV <- liftIO $ getValues state key file
                         pure $ case staleV of
-                            Nothing -> (toShakeValue ShakeResult bs, Failed)
+                            Nothing -> (toShakeValue ShakeResult bs, Failed False)
                             Just v -> case v of
                                 Succeeded ver v -> (toShakeValue ShakeStale bs, Stale ver v)
                                 Stale ver v -> (toShakeValue ShakeStale bs, Stale ver v)
-                                Failed -> (toShakeValue ShakeResult bs, Failed)
+                                Failed b -> (toShakeValue ShakeResult bs, Failed b)
                     Just v -> pure (maybe ShakeNoCutoff ShakeResult bs, Succeeded (vfsVersion =<< modTime) v)
                 liftIO $ setValues state key file res
                 updateFileDiagnostics file (Key key) extras $ map (\(_,y,z) -> (y,z)) diags

@@ -3,7 +3,6 @@
 
 module Development.IDE.Spans.Common (
   showGhc
-, showName
 , safeTyThingId
 , safeTyThingType
 , SpanDoc(..)
@@ -14,8 +13,6 @@ module Development.IDE.Spans.Common (
 , DocMap
 ) where
 
-import Data.Data
-import qualified Data.Generics
 import Data.Maybe
 import qualified Data.Text as T
 import Data.List.Extra
@@ -23,7 +20,6 @@ import Data.Map (Map)
 
 import GHC
 import Outputable hiding ((<>))
-import DynFlags
 import ConLike
 import DataCon
 import Var
@@ -31,16 +27,15 @@ import Var
 import qualified Documentation.Haddock.Parser as H
 import qualified Documentation.Haddock.Types as H
 
+import Development.IDE.GHC.Util
+
 type DocMap = Map Name SpanDoc
 
-showGhc :: Outputable a => a -> String
-showGhc = showPpr unsafeGlobalDynFlags
+showGhc :: Outputable a => a -> T.Text
+showGhc = showSD . ppr
 
-showName :: Outputable a => a -> T.Text
-showName = T.pack . prettyprint
-  where
-    prettyprint x = renderWithStyle unsafeGlobalDynFlags (ppr x) style
-    style = mkUserStyle unsafeGlobalDynFlags neverQualify AllTheWay
+showSD :: SDoc -> T.Text
+showSD = T.pack . unsafePrintSDoc
 
 -- From haskell-ide-engine/src/Haskell/Ide/Engine/Support/HieExtras.hs
 safeTyThingType :: TyThing -> Maybe Type
