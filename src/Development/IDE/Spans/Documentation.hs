@@ -7,19 +7,42 @@
 module Development.IDE.Spans.Documentation (
     getDocumentation
   , getDocumentationTryGhc
+  , DocMap
+  , mkDocMap
   ) where
 
 import           Control.Monad
 import           Data.List.Extra
 import qualified Data.Map as M
+import qualified Data.Set as S
 import           Data.Maybe
 import qualified Data.Text as T
 import           Development.IDE.GHC.Compat
 import           Development.IDE.GHC.Error
 import           Development.IDE.Spans.Common
+import           Development.IDE.Core.Compile
 import           FastString
 import SrcLoc
+import Data.Foldable
+import Data.Either
 
+mkDocMap
+  :: GhcMonad m
+  => [ParsedModule]
+  -> RefMap
+  -> ModIface
+  -> [ModIface]
+  -> m DocMap
+mkDocMap sources rm hmi deps =
+  do mapM_ (`loadDepModule` Nothing) (reverse deps)
+     loadDepModule hmi Nothing
+     foldrM go M.empty names
+  where
+    go n map = do
+      doc <- getDocumentationTryGhc sources n
+      pure $ M.insert n doc map
+    names = rights $ S.toList idents
+    idents = M.keysSet rm
 
 getDocumentationTryGhc
   :: GhcMonad m
