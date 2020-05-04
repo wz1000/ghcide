@@ -154,7 +154,7 @@ mkNameCompItem origName origMod thingType isInfix docs = CI{..}
     compKind = occNameToComKind typeText $ occName origName
     importedFrom = showModName origMod
     isTypeCompl = isTcOcc $ occName origName
-    label = T.pack $ showGhc origName
+    label = showGhc origName
     insertText = case isInfix of
             Nothing -> case getArgText <$> thingType of
                             Nothing -> label
@@ -163,7 +163,7 @@ mkNameCompItem origName origMod thingType isInfix docs = CI{..}
 
             Just Surrounded -> label
     typeText
-          | Just t <- thingType = Just . stripForall $ T.pack (showGhc t)
+          | Just t <- thingType = Just . stripForall $ showGhc t
           | otherwise = Nothing
 
 
@@ -181,7 +181,7 @@ mkNameCompItem origName origMod thingType isInfix docs = CI{..}
         argText :: T.Text
         argText =  mconcat $ List.intersperse " " $ zipWithFrom snippet 1 argTypes
         snippet :: Int -> Type -> T.Text
-        snippet i t = T.pack $ "${" <> show i <> ":" <> showGhc t <> "}"
+        snippet i t = "${" <> T.pack (show i) <> ":" <> showGhc t <> "}"
         getArgs :: Type -> [Type]
         getArgs t
           | isPredTy t = []

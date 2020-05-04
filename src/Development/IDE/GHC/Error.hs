@@ -14,6 +14,7 @@ module Development.IDE.GHC.Error
   , srcSpanToLocation
   , srcSpanToRange
   , realSrcSpanToRange
+  , realSrcSpanToLocation
   , srcSpanToFilename
   , zeroSpan
   , realSpan
@@ -80,6 +81,10 @@ realSrcSpanToRange real =
 srcSpanToFilename :: SrcSpan -> Maybe FilePath
 srcSpanToFilename (UnhelpfulSpan _) = Nothing
 srcSpanToFilename (RealSrcSpan real) = Just $ FS.unpackFS $ srcSpanFile real
+
+realSrcSpanToLocation :: RealSrcSpan -> Location
+realSrcSpanToLocation real = Location file (realSrcSpanToRange real)
+  where file = fromNormalizedUri $ filePathToUri' $ toNormalizedFilePath' $ FS.unpackFS $ srcSpanFile real
 
 srcSpanToLocation :: SrcSpan -> Maybe Location
 srcSpanToLocation src = do

@@ -18,8 +18,9 @@ module Development.IDE.Core.Compile
   , addRelativeImport
   , mkTcModuleResult
   , generateByteCode
-  , generateAndWriteHieFile
+  , writeAndIndexHieFile
   , writeHiFile
+  , addHieFileToDb
   , getModSummaryFromImports
   , loadHieFile
   , loadInterface
@@ -35,12 +36,17 @@ import Development.IDE.Core.Preprocessor
 import Development.IDE.Core.Shake
 import Development.IDE.GHC.Error
 import Development.IDE.GHC.Warnings
+import Development.IDE.Spans.Common
 import Development.IDE.Types.Diagnostics
 import Development.IDE.GHC.Orphans()
 import Development.IDE.GHC.Util
 import qualified GHC.LanguageExtensions.Type as GHC
 import Development.IDE.Types.Options
 import Development.IDE.Types.Location
+import Outputable
+import Control.Concurrent.Chan
+
+import HieDb
 
 #if MIN_GHC_API_VERSION(8,6,0)
 import DynamicLoading (initializePlugins)
@@ -68,6 +74,7 @@ import           TcRnMonad (tct_id, TcTyThing(AGlobal, ATcId), initTc, initIface
 import           TcIface                        (typecheckIface)
 import           TidyPgm
 
+import Data.ByteString (ByteString)
 import Control.Exception.Safe
 import Control.Monad.Extra
 import Control.Monad.Except
@@ -276,9 +283,12 @@ mkTcModuleResult tcm upgradedError = do
     (iface, _) <- liftIO $ mkIfaceTc session Nothing sf details tcGblEnv
 #endif
     let mod_info = HomeModInfo iface details Nothing
-    return $ TcModuleResult tcm mod_info upgradedError Nothing
+    let rnsrc = fromMaybe (error "typecheckModule didn't return renamed source") $ tm_renamed_source tcm
+    hf <- liftIO $ runHsc session $ GHC.mkHieFile mod_summary (fst $ tm_internals_ tcm) rnsrc ""
+    return $ TcModuleResult tcm mod_info upgradedError hf
   where
     (tcGblEnv, details) = tm_internals_ tcm
+    mod_summary  = pm_mod_summary $ tm_parsed_module tcm
 
 atomicFileWrite :: FilePath -> (FilePath -> IO a) -> IO ()
 atomicFileWrite targetPath write = do
@@ -287,39 +297,43 @@ atomicFileWrite targetPath write = do
   (tempFilePath, cleanUp) <- newTempFileWithin dir
   (write tempFilePath >> renameFile tempFilePath targetPath) `onException` cleanUp
 
-generateAndWriteHieFile :: HscEnv -> TypecheckedModule -> IO ([FileDiagnostic],Maybe Compat.HieFile)
-generateAndWriteHieFile hscEnv tcm =
-  handleGenerationErrors dflags "extended interface generation" $ do
-    case tm_renamed_source tcm of
-      Just rnsrc -> do
-        hf <- runHsc hscEnv $
-          GHC.mkHieFile mod_summary (fst $ tm_internals_ tcm) rnsrc ""
-        atomicFileWrite targetPath $ flip GHC.writeHieFile hf
-        pure (Just hf)
-      _ ->
-        return Nothing
+addHieFileToDb :: HieWriterChan -> FilePath -> Bool -> Maybe FilePath -> Compat.HieFile -> DeclDocMap -> IO ()
+addHieFileToDb hiechan targetPath isBoot srcPath hf docs = do
+  writeChan hiechan $ \db -> do
+    atomicFileWrite targetPath $ flip GHC.writeHieFile hf
+    time <- getModificationTime targetPath
+    hPutStrLn stderr $ "Started indexing .hie file: " ++ targetPath ++ " for: " ++ show srcPath
+    addRefsFromLoaded db targetPath isBoot srcPath time hf docs
+    hPutStrLn stderr $ "Finished indexing .hie file: " ++ targetPath
+
+writeAndIndexHieFile :: HscEnv -> HieWriterChan -> ModSummary -> HieFile -> DeclDocMap -> IO [FileDiagnostic]
+writeAndIndexHieFile hscEnv hiechan mod_summary hf docs =
+  handleWritingErrors dflags "extended interface write" $
+    addHieFileToDb hiechan targetPath isBoot path hf docs
   where
     dflags       = hsc_dflags hscEnv
-    mod_summary  = pm_mod_summary $ tm_parsed_module tcm
     mod_location = ms_location mod_summary
     targetPath   = Compat.ml_hie_file mod_location
+    path         = ml_hs_file mod_location
+    isBoot = case ms_hsc_src mod_summary of
+      HsBootFile -> True
+      _ -> False
 
 writeHiFile :: HscEnv -> TcModuleResult -> IO [FileDiagnostic]
 writeHiFile hscEnv tc =
-  fst <$> (handleGenerationErrors dflags "interface generation" $ do
+  handleWritingErrors dflags "interface write" $ do
     atomicFileWrite targetPath $ \fp ->
       writeIfaceFile dflags fp modIface
-    pure Nothing)
   where
     modIface = hm_iface $ tmrModInfo tc
     targetPath = ml_hi_file $ ms_location $ tmrModSummary tc
     dflags = hsc_dflags hscEnv
 
-handleGenerationErrors :: DynFlags -> T.Text -> IO (Maybe a) -> IO ([FileDiagnostic],Maybe a)
-handleGenerationErrors dflags source action =
-  (([],) <$> action) `catches`
-    [ Handler $ return . (,Nothing) . diagFromGhcException source dflags
-    , Handler $ return . (,Nothing) . diagFromString source DsError (noSpan "<internal>")
+handleWritingErrors :: DynFlags -> T.Text -> IO () -> IO [FileDiagnostic]
+handleWritingErrors dflags source action =
+  (const [] <$> action) `catches`
+    [ Handler $ return . diagFromGhcException source dflags
+    , Handler $ return . diagFromString source DsError (noSpan "<internal>")
     . (("Error during " ++ T.unpack source) ++) . show @SomeException
     ]
 
@@ -665,7 +679,7 @@ getDocsBatch _mod _names =
                else pure (Right ( Map.lookup name dmap
                                 , Map.findWithDefault Map.empty name amap))
     case res of
-        Just x -> return $ map (first prettyPrint) x
+        Just x -> return $ map (first $ T.unpack . showGhc) x
         Nothing -> throwErrors errs
   where
     throwErrors = liftIO . throwIO . mkSrcErr
