@@ -100,6 +100,8 @@ import OpenTelemetry.Eventlog
 
 import Data.IORef
 import NameCache
+import UniqSupply
+import PrelInfo
 
 -- information we stash inside the shakeExtra field
 data ShakeExtras = ShakeExtras
@@ -520,14 +522,15 @@ shakeOpen :: IO LSP.LspId
           -> Debouncer NormalizedUri
           -> Maybe FilePath
           -> IdeReportProgress
-          -> IORef NameCache
           -> ShakeOptions
           -> Rules ()
           -> IO IdeState
-shakeOpen getLspId eventer logger debouncer shakeProfileDir (IdeReportProgress reportProgress) ideNc opts rules = do
+shakeOpen getLspId eventer logger debouncer shakeProfileDir (IdeReportProgress reportProgress) opts rules = do
     inProgress <- newVar HMap.empty
     shakeAbort <- newMVar $ return ()
     shakeQueue <- newShakeQueue
+    us <- mkSplitUniqSupply 'r'
+    ideNc <- newIORef (initNameCache us knownKeyNames)
     shakeExtras <- do
         globals <- newVar HMap.empty
         state <- newVar HMap.empty

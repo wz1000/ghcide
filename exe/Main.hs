@@ -10,8 +10,6 @@ module Main(main) where
 import Data.Time.Clock (UTCTime)
 import Linker (initDynLinker)
 import Data.IORef
-import NameCache
-import UniqSupply
 import PrelInfo
 import Packages
 import Module
@@ -73,6 +71,7 @@ import HscTypes (HscEnv(..), ic_dflags)
 import DynFlags (PackageFlag(..), PackageArg(..))
 import GHC hiding (def)
 import           GHC.Check                      (runTimeVersion)
+import NameCache
 
 import           HIE.Bios.Cradle
 import           HIE.Bios.Types
@@ -127,8 +126,6 @@ main = do
         hPutStrLn stderr "If you are seeing this in a terminal, you probably should have run ghcide WITHOUT the --lsp option!"
         runLanguageServer options (pluginHandler plugins) onInitialConfiguration onConfigurationChange $ \getLspId event vfs caps -> do
             t <- t
-            us      <- mkSplitUniqSupply 'r'
-            nc_var  <- newIORef (initNameCache us knownKeyNames)
             hPutStrLn stderr $ "Started LSP server in " ++ showDuration t
             let options = (defaultIdeOptions $ loadSession dir)
                     { optReportProgress = clientSupportsProgress caps
@@ -140,7 +137,7 @@ main = do
                 logLevel = if argsVerbose then minBound else Info
             debouncer <- newAsyncDebouncer
             fst <$> initialise caps (mainRule >> pluginRules plugins)
-                      getLspId event (logger logLevel) debouncer nc_var options vfs
+                      getLspId event (logger logLevel) debouncer options vfs
     else do
         -- GHC produces messages with UTF8 in them, so make sure the terminal doesn't error
         hSetEncoding stdout utf8
@@ -163,9 +160,7 @@ main = do
         putStrLn "\nStep 3/6: Initializing the IDE"
         vfs <- makeVFSHandle
         debouncer <- newAsyncDebouncer
-        us      <- mkSplitUniqSupply 'r'
-        nc_var  <- newIORef (initNameCache us knownKeyNames)
-        (ide, worker) <- initialise def mainRule (pure $ IdInt 0) (showEvent lock) (logger Debug) debouncer nc_var (defaultIdeOptions $ loadSession dir) vfs
+        (ide, worker) <- initialise def mainRule (pure $ IdInt 0) (showEvent lock) (logger Debug) debouncer (defaultIdeOptions $ loadSession dir) vfs
 
         putStrLn "\nStep 4/6: Type checking the files"
         setFilesOfInterest ide $ HashSet.fromList $ map toNormalizedFilePath' files

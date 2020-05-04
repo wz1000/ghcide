@@ -35,10 +35,6 @@ import Control.Concurrent.Async
 import Control.Monad
 import GHC.Conc
 
-import Data.IORef
-import NameCache
-
-
 newtype GlobalIdeOptions = GlobalIdeOptions IdeOptions
 instance IsIdeGlobal GlobalIdeOptions
 
@@ -52,11 +48,10 @@ initialise :: LSP.ClientCapabilities
            -> (LSP.FromServerMessage -> IO ())
            -> Logger
            -> Debouncer LSP.NormalizedUri
-           -> IORef NameCache
            -> IdeOptions
            -> VFSHandle
            -> IO (IdeState, Async ())
-initialise caps mainRule getLspId toDiags logger debouncer ideNc options vfs = do
+initialise caps mainRule getLspId toDiags logger debouncer options vfs = do
     ide <- shakeOpen
         getLspId
         toDiags
@@ -64,7 +59,6 @@ initialise caps mainRule getLspId toDiags logger debouncer ideNc options vfs = d
         debouncer
         (optShakeProfiling options)
         (optReportProgress options)
-        ideNc
         shakeOptions
           { shakeThreads = optThreads options
           , shakeFiles   = fromMaybe "/dev/null" (optShakeFiles options)
