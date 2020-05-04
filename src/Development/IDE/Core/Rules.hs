@@ -23,6 +23,8 @@ module Development.IDE.Core.Rules(
     getDefinition,
     getTypeDefinition,
     highlightAtPoint,
+    refsAtPoint,
+    workspaceSymbols,
     getDependencies,
     getParsedModule,
     generateCore,
@@ -30,11 +32,10 @@ module Development.IDE.Core.Rules(
 
 import Fingerprint
 
-import Data.Binary hiding (get, put)
 import Data.Tuple.Extra
+import Data.Binary
 import Util
 import Control.Monad.Extra
-import Control.Applicative
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Maybe
 import Development.IDE.Core.Compile
@@ -65,7 +66,7 @@ import           Development.Shake                        hiding (Diagnostic)
 import Development.IDE.Core.RuleTypes
 import qualified Data.ByteString.Char8 as BS
 import Development.IDE.Core.PositionMapping
-import           Language.Haskell.LSP.Types (DocumentHighlight (..))
+import           Language.Haskell.LSP.Types (DocumentHighlight (..), SymbolInformation(..), SymbolKind(..))
 
 import qualified GHC.LanguageExtensions as LangExt
 import HscTypes
@@ -78,15 +79,13 @@ import Development.IDE.Core.Service
 import Development.IDE.Core.Shake
 import Development.Shake.Classes hiding (get, put)
 import Control.Monad.Trans.Except (runExceptT)
-import Data.ByteString (ByteString)
 import Control.Concurrent.Async (concurrently)
-import System.Time.Extra
 import Control.Monad.Reader
-import System.Directory ( getModificationTime )
 import Control.Exception
 
 import FastString (FastString(uniq))
 import qualified HeaderInfo as Hdr
+import qualified HieDb
 
 -- | This is useful for rules to convert rules that can only produce errors or
 -- a result into the more general IdeResult type that supports producing
@@ -132,13 +131,14 @@ getAtPoint file pos = fmap join $ runMaybeT $ do
   return $ AtPoint.atPoint opts hf dm pos'
 
 -- | Goto Definition.
-getDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe Location)
+getDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe [Location])
 getDefinition file pos = runMaybeT $ do
     ide <- ask
     opts <- liftIO $ getIdeOptionsIO ide
     (HFR hf _, mapping) <- useE GetHieFile file
     !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
-    AtPoint.gotoDefinition (getHieFile ide file) opts hf pos'
+    hiedb <- lift $ asks hiedb
+    AtPoint.gotoDefinition hiedb undefined opts hf pos'
 
 getTypeDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe [Location])
 getTypeDefinition file pos = runMaybeT $ do
@@ -146,7 +146,8 @@ getTypeDefinition file pos = runMaybeT $ do
     opts <- liftIO $ getIdeOptionsIO ide
     (HFR hf _, mapping) <- useE GetHieFile file
     !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
-    AtPoint.gotoTypeDefinition (getHieFile ide file) opts hf pos'
+    hiedb <- lift $ asks hiedb
+    AtPoint.gotoTypeDefinition hiedb undefined opts hf pos'
 
 highlightAtPoint :: NormalizedFilePath -> Position -> IdeAction (Maybe [DocumentHighlight])
 highlightAtPoint file pos = runMaybeT $ do
@@ -154,72 +155,32 @@ highlightAtPoint file pos = runMaybeT $ do
     !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
     AtPoint.documentHighlight hf rf pos'
 
-getHieFile
-  :: ShakeExtras
-  -> NormalizedFilePath -- ^ file we're editing
-  -> Module -- ^ module dep we want info for
-  -> MaybeT IdeAction (HieFile, FilePath) -- ^ hie stuff for the module
-getHieFile ide file mod = do
-  TransitiveDependencies {transitiveNamedModuleDeps} <- fst <$> useE GetDependencies file
-  case find (\x -> nmdModuleName x == moduleName mod) transitiveNamedModuleDeps of
-    Just NamedModuleDep{nmdFilePath=nfp} -> do
-        let modPath = fromNormalizedFilePath nfp
-        hieFile <- getHomeHieFile nfp
-        return (hieFile, modPath)
-    _ -> getPackageHieFile ide mod file
+reportDbState :: HieDb.HieDb -> MaybeT IdeAction ()
+reportDbState hiedb = do
+  ide <- ask
+  imods <- liftIO $ map (HieDb.modInfoName . HieDb.hieModInfo) <$> HieDb.getAllIndexedMods hiedb
+  mg <- fst <$> useE GetModuleGraph emptyFilePath
+  let mods = nub $ map showableModuleName $ IntMap.elems $ depModuleNames mg
+  liftIO $ L.logInfo (logger ide) $ T.pack $ "Modules in graph but not indexed: " ++ show (map ShowableModuleName (mods \\ imods))
+  pure ()
 
-getHomeHieFile :: NormalizedFilePath -> MaybeT IdeAction HieFile
-getHomeHieFile f = do
-  ms <- fst <$> useE GetModSummary f
-  let normal_hie_f = toNormalizedFilePath' hie_f
-      hie_f = ml_hie_file $ ms_location ms
+refsAtPoint :: NormalizedFilePath -> Position -> IdeAction (Maybe [Location])
+refsAtPoint file pos = runMaybeT $ do
+    (HFR hf rf,mapping) <- useE GetHieFile file
+    hiedb <- lift $ asks hiedb
+    _ <- lift $ runMaybeT $ reportDbState hiedb
+    !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
+    AtPoint.referencesAtPoint hiedb undefined hf rf pos'
 
-  mbHieTimestamp <- either (\(_ :: IOException) -> Nothing) Just <$> (liftIO $ try $ getModificationTime hie_f)
-  srcTimestamp   <- MaybeT (either (\(_ :: IOException) -> Nothing) Just <$> (liftIO $ try $ getModificationTime $ fromNormalizedFilePath f))
-  liftIO $ print (mbHieTimestamp, srcTimestamp, hie_f, normal_hie_f)
-  let isUpToDate
-        | Just d <- mbHieTimestamp = d > srcTimestamp
-        | otherwise = False
-
-  if isUpToDate
-    then do
-      ncu <- mkUpdater
-      hf <- liftIO $ whenMaybe isUpToDate (loadHieFile ncu hie_f)
-      MaybeT $ return hf
-    else do
-      wait <- lift $ delayedAction $ mkDelayedAction "OutOfDateHie" L.Info $ do
-        hsc <- hscEnv <$> use_ GhcSession f
-        pm <- use_ GetParsedModule f
-        typeCheckRuleDefinition hsc pm DoGenerateInterfaceFiles
-      _ <- MaybeT $ liftIO $ timeout 1 wait
-      ncu <- mkUpdater
-      liftIO $ loadHieFile ncu hie_f
-
-getPackageHieFile :: ShakeExtras
-                  -> Module             -- ^ Package Module to load .hie file for
-                  -> NormalizedFilePath -- ^ Path of home module importing the package module
-                  -> MaybeT IdeAction (HieFile, FilePath)
-getPackageHieFile ide mod file = do
-    pkgState  <- hscEnv . fst <$> useE GhcSession file
-    IdeOptions {..} <- liftIO $ getIdeOptionsIO ide
-    let unitId = moduleUnitId mod
-    case lookupPackageConfig unitId pkgState of
-        Just pkgConfig -> do
-            -- 'optLocateHieFile' returns Nothing if the file does not exist
-            hieFile <- liftIO $ optLocateHieFile optPkgLocationOpts pkgConfig mod
-            path    <- liftIO $ optLocateSrcFile optPkgLocationOpts pkgConfig mod
-            case (hieFile, path) of
-                (Just hiePath, Just modPath) -> do
-                    -- deliberately loaded outside the Shake graph
-                    -- to avoid dependencies on non-workspace files
-                        ncu <- mkUpdater
-                        MaybeT $ liftIO $ Just . (, modPath) <$> loadHieFile ncu hiePath
-                _ -> MaybeT $ return Nothing
-        _ -> MaybeT $ return Nothing
+workspaceSymbols :: T.Text -> IdeAction (Maybe [SymbolInformation])
+workspaceSymbols query = runMaybeT $ do
+  hiedb <- lift $ asks hiedb
+  res <- liftIO $ HieDb.searchDef hiedb $ T.unpack query
+  pure $ map AtPoint.defRowToSymbolInfo res
 
 -- | Parse the contents of a daml file.
 getParsedModule :: NormalizedFilePath -> Action (Maybe ParsedModule)
-getParsedModule file = use GetParsedModule file
+getParsedModule file = fmap pmrModule <$> use GetParsedModule file
 
 ------------------------------------------------------------
 -- Rules
@@ -255,8 +216,11 @@ getParsedModuleRule = defineEarlyCutoff $ \GetParsedModule file -> do
 
     -- Parse again (if necessary) to capture Haddock parse errors
     if gopt Opt_Haddock dflags
-        then
-            liftIO mainParse
+        then do
+            (diags,mr) <- liftIO mainParse
+            case mr of
+              Just pmr -> pure (Just (pmrHash pmr), (diags, mr))
+              Nothing  -> pure (Nothing, (diags, mr))
         else do
             let haddockParse = getParsedModuleDefinition (withOptHaddock hsc) opt comp_pkgs file contents
 
@@ -266,18 +230,20 @@ getParsedModuleRule = defineEarlyCutoff $ \GetParsedModule file -> do
             -- If we can parse Haddocks, might as well use them
             --
             -- HLINT INTEGRATION: might need to save the other parsed module too
-            ((fp,(diags,res)),(fph,(diagsh,resh))) <- liftIO $ concurrently mainParse haddockParse
+            ((diags,res),(diagsh,resh)) <- liftIO $ concurrently mainParse haddockParse
 
             -- Merge haddock and regular diagnostics so we can always report haddock
             -- parse errors
             let diagsM = mergeParseErrorsHaddock diags diagsh
             case resh of
-              Just _ -> pure (fph, (diagsM, resh))
+              Just pmr -> pure (Just (pmrHash pmr), (diagsM, resh))
               -- If we fail to parse haddocks, report the haddock diagnostics as well and
               -- return the non-haddock parse.
               -- This seems to be the correct behaviour because the Haddock flag is added
               -- by us and not the user, so our IDE shouldn't stop working because of it.
-              Nothing  -> pure (fp, (diagsM, res))
+              Nothing  -> case res of
+                Just pmr -> pure (Just (pmrHash pmr), (diagsM, res))
+                Nothing -> pure (Nothing,(diagsM,Nothing))
 
 
 withOptHaddock :: HscEnv -> HscEnv
@@ -296,16 +262,14 @@ mergeParseErrorsHaddock normal haddock = normal ++
     fixMessage x | "parse error " `T.isPrefixOf` x = "Haddock " <> x
                  | otherwise = "Haddock: " <> x
 
-getParsedModuleDefinition :: HscEnv -> IdeOptions -> [PackageName] -> NormalizedFilePath -> Maybe T.Text -> IO (Maybe ByteString, ([FileDiagnostic], Maybe ParsedModule))
+getParsedModuleDefinition :: HscEnv -> IdeOptions -> [PackageName] -> NormalizedFilePath -> Maybe T.Text -> IO (([FileDiagnostic], Maybe ParsedModuleResult))
 getParsedModuleDefinition packageState opt comp_pkgs file contents = do
     (diag, res) <- parseModule opt packageState comp_pkgs (fromNormalizedFilePath file) (fmap textToStringBuffer contents)
     case res of
-        Nothing -> pure (Nothing, (diag, Nothing))
+        Nothing -> pure (diag, Nothing)
         Just (contents, modu) -> do
-            mbFingerprint <- if isNothing $ optShakeFiles opt
-                then pure Nothing
-                else Just . fingerprintToBS <$> fingerprintFromStringBuffer contents
-            pure (mbFingerprint, (diag, Just modu))
+            fp <- fingerprintToBS <$> fingerprintFromStringBuffer contents
+            pure (diag, Just $ ParsedModuleResult modu fp)
 
 getLocatedImportsRule :: Rules ()
 getLocatedImportsRule =
@@ -450,15 +414,36 @@ getDependenciesRule =
 getHieFileRule :: Rules ()
 getHieFileRule =
     define $ \GetHieFile f -> do
-      tcm <- use_ TypeCheck f
-      hf <- case tmrHieFile tcm of
-        Just hf -> pure ([],Just hf)
-        Nothing -> do
-          hsc  <- hscEnv <$> use_ GhcSession f
-          liftIO $ generateAndWriteHieFile hsc (tmrModule tcm)
+      pm <- use_ GetParsedModule f
+      se <- getShakeExtras
+      (diags,hf) <- do
+        liftIO $ L.logInfo (logger se) $ "Regenerating HIE File: " <> T.pack (show f)
+        hsc  <- hscEnv <$> use_ GhcSessionDeps f
+        (diags,tcm) <- typeCheckRuleDefinition hsc pm DoGenerateInterfaceFiles
+        pure (diags, tmrHieFile =<< tcm)
       let refmap = generateReferencesMap . getAsts . hie_asts
-      pure $ fmap (\x -> HFR x $ refmap x) <$> hf
+      pure $ (diags, (\x -> HFR x (refmap x)) <$> hf)
 
+persistentHieFileRule :: Rules ()
+persistentHieFileRule = addPersistentRule GetHieFile $ \file -> runMaybeT $ do
+  res <- MaybeT $ readHieFileFromDisk file
+  let refmap = generateReferencesMap . getAsts . hie_asts $ res
+  pure $ HFR res refmap
+
+readHieFileFromDisk :: NormalizedFilePath -> IdeAction (Maybe HieFile)
+readHieFileFromDisk file = runMaybeT $ do
+  nc <- asks ideNc
+  db <- asks hiedb
+  logger <- asks logger
+  let log = L.logInfo logger
+  row <- MaybeT $ liftIO $ HieDb.lookupHieFileFromSource db $ fromNormalizedFilePath file
+  let hie_loc = HieDb.hieModuleHieFile row
+  liftIO $ log $ "LOADING HIE FILE :" <> T.pack (show file)
+  res <- liftIO $ try @SomeException $ loadHieFile (mkUpdater nc) hie_loc
+  liftIO . log $ either (const $ "FAILED LOADING HIE FILE FOR:" <> T.pack (show file))
+                        (const $ "SUCCEEDED LOADING HIE FILE FOR:" <> T.pack (show file))
+                        res
+  MaybeT $ pure $ either (const Nothing) Just  res
 
 getDocMapRule :: Rules ()
 getDocMapRule =
@@ -511,18 +496,20 @@ data GenerateInterfaceFiles
 -- retain the information forever in the shake graph.
 typeCheckRuleDefinition
     :: HscEnv
-    -> ParsedModule
+    -> ParsedModuleResult
     -> GenerateInterfaceFiles -- ^ Should generate .hi and .hie files ?
     -> Action (IdeResult TcModuleResult)
-typeCheckRuleDefinition hsc pm generateArtifacts = do
+typeCheckRuleDefinition hsc pmr generateArtifacts = do
+  let pm = pmrModule pmr
   setPriority priorityTypeCheck
   IdeOptions { optDefer = defer } <- getIdeOptions
 
+  ShakeExtras{hiedbChan} <- getShakeExtras
   addUsageDependencies $ liftIO $ do
     res <- typecheckModule defer hsc pm
     case res of
       (diags, Just (hsc,tcm)) | DoGenerateInterfaceFiles <- generateArtifacts -> do
-        (diagsHie,hf) <- generateAndWriteHieFile hsc (tmrModule tcm)
+        (diagsHie,hf) <- generateAndWriteHieFile hsc hiedbChan (tmrModule tcm) (pmrHash pmr)
         diagsHi  <- generateAndWriteHiFile hsc tcm
         return (diags <> diagsHi <> diagsHie, Just tcm{tmrHieFile=hf})
       (diags, res) -> return (diags, snd <$> res)
@@ -712,12 +699,12 @@ regenerateHiFile sess f = do
     opt <- getIdeOptions
     (_, contents) <- getFileContents f
     -- Embed --haddocks in the interface file
-    (_, (diags, mb_pm)) <- liftIO $ getParsedModuleDefinition (withOptHaddock hsc) opt comp_pkgs f contents
+    (diags, mb_pm) <- liftIO $ getParsedModuleDefinition (withOptHaddock hsc) opt comp_pkgs f contents
     (diags, mb_pm) <- case mb_pm of
         Just _ -> return (diags, mb_pm)
         Nothing -> do
             -- if parsing fails, try parsing again with Haddock turned off
-            (_, (diagsNoHaddock, mb_pm)) <- liftIO $ getParsedModuleDefinition hsc opt comp_pkgs f contents
+            (diagsNoHaddock, mb_pm) <- liftIO $ getParsedModuleDefinition hsc opt comp_pkgs f contents
             return (mergeParseErrorsHaddock diagsNoHaddock diags, mb_pm)
     case mb_pm of
         Nothing -> return (diags, Nothing)
@@ -760,3 +747,4 @@ mainRule = do
     isFileOfInterestRule
     getModSummaryRule
     getModuleGraphRule
+    persistentHieFileRule
