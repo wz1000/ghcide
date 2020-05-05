@@ -84,6 +84,7 @@ import NameCache
 
 import HieDb.Create
 import HieDb.Types
+import Database.SQLite.Simple
 
 --import Rules
 --import RuleTypes
@@ -103,6 +104,8 @@ ghcideVersion = do
 runWithDb :: FilePath -> (HieDb -> HieWriterChan -> IO ()) -> IO ()
 runWithDb fp k =
   withHieDb fp $ \writedb -> do
+    execute_ (getConn writedb) "PRAGMA journal_mode=WAL;"
+    --setTrace (getConn writedb) (Just $ T.appendFile "/tmp/sqltrace" . (<>"\n"))
     initConn writedb
     chan <- newChan
     race_ (writerThread writedb chan) (withHieDb fp $ \readdb -> k readdb chan)
@@ -114,8 +117,10 @@ runWithDb fp k =
 getHieDbLoc :: FilePath -> IO FilePath
 getHieDbLoc dir = do
   let db = (dirHash++"-"++takeBaseName dir++"-"++VERSION_ghc <.> "hiedb")
-      dirHash = B.unpack $ H.hash $ B.pack dir
-  IO.getXdgDirectory IO.XdgCache (cacheDir </> db)
+      dirHash = B.unpack $ encode $ H.hash $ B.pack dir
+  cDir <- IO.getXdgDirectory IO.XdgCache cacheDir
+  createDirectoryIfMissing True cDir
+  pure (cDir </> db)
 
 main :: IO ()
 main = do
