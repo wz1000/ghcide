@@ -19,6 +19,7 @@ module Development.IDE.Core.Compile
   , generateByteCode
   , generateAndWriteHieFile
   , generateAndWriteHiFile
+  , addHieFileToDb
   , getModSummaryFromImports
   , loadHieFile
   , loadInterface
@@ -64,7 +65,6 @@ import           HscMain                        (hscInteractive, hscSimplify)
 import           LoadIface                      (readIface)
 import qualified Maybes
 import           MkIface
-import           NameCache
 import           StringBuffer                   as SB
 import           TcRnMonad (initIfaceLoad, tcg_th_coreplugins)
 import           TcIface                        (typecheckIface)
@@ -286,6 +286,11 @@ atomicFileWrite targetPath write = do
   (tempFilePath, cleanUp) <- newTempFileWithin dir
   (write tempFilePath >> renameFile tempFilePath targetPath) `onException` cleanUp
 
+addHieFileToDb :: HieWriterChan -> FilePath -> Compat.HieFile -> IO ()
+addHieFileToDb hiechan targetPath hf = do
+  time <- getModificationTime targetPath
+  writeChan hiechan $ \db -> addRefsFromLoaded db targetPath time hf
+
 generateAndWriteHieFile :: HscEnv -> HieWriterChan -> TypecheckedModule -> IO ([FileDiagnostic],Maybe Compat.HieFile)
 generateAndWriteHieFile hscEnv hiechan tcm =
   handleGenerationErrors dflags "extended interface generation" $ do
@@ -294,8 +299,7 @@ generateAndWriteHieFile hscEnv hiechan tcm =
         hf <- runHsc hscEnv $
           GHC.mkHieFile mod_summary (fst $ tm_internals_ tcm) rnsrc ""
         atomicFileWrite targetPath $ flip GHC.writeHieFile hf
-        time <- getModificationTime targetPath
-        writeChan hiechan $ \db -> addRefsFromLoaded db targetPath time hf
+        addHieFileToDb hiechan targetPath hf
         pure (Just hf)
       _ ->
         return Nothing
