@@ -111,7 +111,8 @@ runWithDb fp k =
   where
     writerThread db chan =forever $ do
       k <- readChan chan
-      k db
+      k db `catch` \e@SQLError{} -> do
+        hPutStrLn stderr $ "Error in worker, ignoring: " ++ show e
 
 getHieDbLoc :: FilePath -> IO FilePath
 getHieDbLoc dir = do
