@@ -224,7 +224,8 @@ executable ghcide
         optparse-applicative,
         shake,
         text,
-        unordered-containers
+        unordered-containers,
+        sqlite-simple
     other-modules:
         Utils
         Arguments
