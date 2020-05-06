@@ -34,6 +34,7 @@ import Data.Binary
 import Util
 import Data.Bifunctor (second)
 import Control.Monad.Extra
+import Control.Applicative
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Maybe
 import Development.IDE.Core.Compile
@@ -235,6 +236,12 @@ priorityGenerateCore = Priority (-1)
 priorityFilesOfInterest :: Priority
 priorityFilesOfInterest = Priority (-2)
 
+-- | IMPORTANT FOR HLINT INTEGRATION:
+-- We currently parse the module both with and without Opt_Haddock, and
+-- return the one with Haddocks if it -- succeeds. However, this may not work
+-- for hlint, and we might need to save the one without haddocks too.
+-- See https://github.com/digital-asset/ghcide/pull/350#discussion_r370878197
+-- and https://github.com/mpickering/ghcide/pull/22#issuecomment-625070490
 getParsedModuleRule :: Rules ()
 getParsedModuleRule = defineEarlyCutoff $ \GetParsedModule file -> do
     sess <- use_ GhcSession file
@@ -254,18 +261,27 @@ getParsedModuleRule = defineEarlyCutoff $ \GetParsedModule file -> do
             liftIO mainParse
         else do
             let hscHaddock = hsc{hsc_dflags = gopt_set dflags Opt_Haddock}
-                haddockParse = do
-                    (_, (!diagsHaddock, _)) <-
-                        getParsedModuleDefinition hscHaddock opt comp_pkgs file contents
-                    return diagsHaddock
+                haddockParse = getParsedModuleDefinition hscHaddock opt comp_pkgs file contents
 
-            ((fingerPrint, (diags, res)), diagsHaddock) <-
-                -- parse twice, with and without Haddocks, concurrently
-                -- we cannot ignore Haddock parse errors because files of
-                -- non-interest are always parsed with Haddocks
-                liftIO $ concurrently mainParse haddockParse
+            -- parse twice, with and without Haddocks, concurrently
+            -- we cannot ignore Haddock parse errors because files of
+            -- non-interest are always parsed with Haddocks
+            -- If we can parse Haddocks, might as well use them
+            --
+            -- HLINT INTEGRATION: might need to save the other parsed module too
+            ((fp,(diags,res)),(fph,(diagsh,resh))) <- liftIO $ concurrently mainParse haddockParse
 
-            return (fingerPrint, (mergeDiagnostics diags diagsHaddock, res))
+            -- Merge haddock and regular diagnostics so we can always report haddock
+            -- parse errors
+            let diagsM = mergeDiagnostics diags diagsh
+            case resh of
+              Just _ -> pure (fph, (diagsM, resh))
+              -- If we fail to parse haddocks, report the haddock diagnostics as well and
+              -- return the non-haddock parse.
+              -- This seems to be the correct behaviour because the Haddock flag is added
+              -- by us and not the user, so our IDE shouldn't stop working because of it.
+              Nothing  -> pure (fp, (diagsM, res))
+
 
 getParsedModuleDefinition :: HscEnv -> IdeOptions -> [PackageName] -> NormalizedFilePath -> Maybe T.Text -> IO (Maybe ByteString, ([FileDiagnostic], Maybe ParsedModule))
 getParsedModuleDefinition packageState opt comp_pkgs file contents = do
@@ -440,7 +456,7 @@ getRefMapRule =
 getDocMapRule :: Rules ()
 getDocMapRule =
     define $ \GetDocMap file -> do
-      tc <- tmrModule <$> use_ TypeCheck file
+      hmi <- tmrModInfo <$> use_ TypeCheck file
       hsc <- hscEnv <$> use_ GhcSession file
       PRefMap rf <- use_ GetRefMap file
 
@@ -457,7 +473,7 @@ getDocMapRule =
 
       ifaces <- uses_ GetModIface tdeps
 
-      docMap <- liftIO $ evalGhcEnv hsc $ mkDocMap parsedDeps rf tc (map hirModIface ifaces)
+      docMap <- liftIO $ evalGhcEnv hsc $ mkDocMap parsedDeps rf hmi (map hirModIface ifaces)
       return ([],Just $ PDocMap docMap)
 
 -- Typechecks a module.

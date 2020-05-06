@@ -32,13 +32,12 @@ mkDocMap
   :: GhcMonad m
   => [ParsedModule]
   -> RefMap
-  -> TypecheckedModule
+  -> HomeModInfo
   -> [ModIface]
   -> m DocMap
-mkDocMap sources rm TypecheckedModule{..} deps =
+mkDocMap sources rm hmi deps =
   do mapM_ (`loadDepModule` Nothing) (reverse deps)
-     forM_ (modInfoIface tm_checked_module_info) $ \modIface ->
-       modifySession (loadModuleHome $ HomeModInfo modIface (snd tm_internals_) Nothing)
+     modifySession (loadModuleHome hmi)
      foldrM go M.empty names
   where
     go n map = do
