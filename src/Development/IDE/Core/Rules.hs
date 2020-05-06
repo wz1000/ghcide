@@ -282,7 +282,6 @@ getParsedModuleRule = defineEarlyCutoff $ \GetParsedModule file -> do
               -- by us and not the user, so our IDE shouldn't stop working because of it.
               Nothing  -> pure (fp, (diagsM, res))
 
-
 getParsedModuleDefinition :: HscEnv -> IdeOptions -> [PackageName] -> NormalizedFilePath -> Maybe T.Text -> IO (Maybe ByteString, ([FileDiagnostic], Maybe ParsedModule))
 getParsedModuleDefinition packageState opt comp_pkgs file contents = do
     (diag, res) <- parseModule opt packageState comp_pkgs (fromNormalizedFilePath file) (fmap textToStringBuffer contents)
