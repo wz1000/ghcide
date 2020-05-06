@@ -35,6 +35,7 @@ import Data.Binary
 import Util
 import Data.Bifunctor (second)
 import Control.Monad.Extra
+import Control.Applicative
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Maybe
 import Development.IDE.Core.Compile
@@ -255,18 +256,14 @@ getParsedModuleRule = defineEarlyCutoff $ \GetParsedModule file -> do
             liftIO mainParse
         else do
             let hscHaddock = hsc{hsc_dflags = gopt_set dflags Opt_Haddock}
-                haddockParse = do
-                    (_, (!diagsHaddock, _)) <-
-                        getParsedModuleDefinition hscHaddock opt comp_pkgs file contents
-                    return diagsHaddock
+                haddockParse = getParsedModuleDefinition hscHaddock opt comp_pkgs file contents
 
-            ((fingerPrint, (diags, res)), diagsHaddock) <-
-                -- parse twice, with and without Haddocks, concurrently
-                -- we cannot ignore Haddock parse errors because files of
-                -- non-interest are always parsed with Haddocks
-                liftIO $ concurrently mainParse haddockParse
-
-            return (fingerPrint, (mergeDiagnostics diags diagsHaddock, res))
+            -- parse twice, with and without Haddocks, concurrently
+            -- we cannot ignore Haddock parse errors because files of
+            -- non-interest are always parsed with Haddocks
+            -- If we can parse Haddocks, might as well use them
+            ((fp,(diags,res)),(fph,(diagsh,resh))) <- liftIO $ concurrently mainParse haddockParse
+            return (fph<|>fp,(mergeDiagnostics diags diagsh, resh<|>res))
 
 getParsedModuleDefinition :: HscEnv -> IdeOptions -> [PackageName] -> NormalizedFilePath -> Maybe T.Text -> IO (Maybe ByteString, ([FileDiagnostic], Maybe ParsedModule))
 getParsedModuleDefinition packageState opt comp_pkgs file contents = do
@@ -441,7 +438,7 @@ getRefMapRule =
 getDocMapRule :: Rules ()
 getDocMapRule =
     define $ \GetDocMap file -> do
-      tc <- tmrModule <$> use_ TypeCheck file
+      hmi <- tmrModInfo <$> use_ TypeCheck file
       hsc <- hscEnv <$> use_ GhcSession file
       PRefMap rf <- use_ GetRefMap file
 
@@ -458,7 +455,7 @@ getDocMapRule =
 
       ifaces <- uses_ GetModIface tdeps
 
-      docMap <- liftIO $ evalGhcEnv hsc $ mkDocMap parsedDeps rf tc (map hirModIface ifaces)
+      docMap <- liftIO $ evalGhcEnv hsc $ mkDocMap parsedDeps rf hmi (map hirModIface ifaces)
       return ([],Just $ PDocMap docMap)
 
 -- Typechecks a module.
