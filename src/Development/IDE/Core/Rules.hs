@@ -237,6 +237,12 @@ priorityGenerateCore = Priority (-1)
 priorityFilesOfInterest :: Priority
 priorityFilesOfInterest = Priority (-2)
 
+-- | IMPORTANT FOR HLINT INTEGRATION:
+-- We currently parse the module both with and without Opt_Haddock, and
+-- return the one with Haddocks if it -- succeeds. However, this may not work
+-- for hlint, and we might need to save the one without haddocks too.
+-- See https://github.com/digital-asset/ghcide/pull/350#discussion_r370878197
+-- and https://github.com/mpickering/ghcide/pull/22#issuecomment-625070490
 getParsedModuleRule :: Rules ()
 getParsedModuleRule = defineEarlyCutoff $ \GetParsedModule file -> do
     sess <- use_ GhcSession file
@@ -262,6 +268,8 @@ getParsedModuleRule = defineEarlyCutoff $ \GetParsedModule file -> do
             -- we cannot ignore Haddock parse errors because files of
             -- non-interest are always parsed with Haddocks
             -- If we can parse Haddocks, might as well use them
+            --
+            -- HLINT INTEGRATION: might need to save the other parsed module too
             ((fp,(diags,res)),(fph,(diagsh,resh))) <- liftIO $ concurrently mainParse haddockParse
             return (fph<|>fp,(mergeDiagnostics diags diagsh, resh<|>res))
 
