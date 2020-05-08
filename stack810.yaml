@@ -10,7 +10,7 @@ extra-deps:
 - ghc-check-0.3.0.1
 - hie-bios-0.5.0
 - opentelemetry-0.3.2
-
+- hie-bios-0.5.0
 # for ghc-8.10
 - Cabal-3.2.0.0
 - lens-4.19.1
