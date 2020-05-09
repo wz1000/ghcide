@@ -289,7 +289,10 @@ atomicFileWrite targetPath write = do
 addHieFileToDb :: HieWriterChan -> FilePath -> Compat.HieFile -> IO ()
 addHieFileToDb hiechan targetPath hf = do
   time <- getModificationTime targetPath
-  writeChan hiechan $ \db -> addRefsFromLoaded db targetPath time hf
+  writeChan hiechan $ \db -> do
+    hPutStrLn stderr $ "Started indexing .hie file: " ++ targetPath
+    addRefsFromLoaded db targetPath time hf
+    hPutStrLn stderr $ "Finished indexing .hie file: " ++ targetPath
 
 generateAndWriteHieFile :: HscEnv -> HieWriterChan -> TypecheckedModule -> IO ([FileDiagnostic],Maybe Compat.HieFile)
 generateAndWriteHieFile hscEnv hiechan tcm =
