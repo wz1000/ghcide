@@ -24,6 +24,7 @@ module Development.IDE.Core.Rules(
     getTypeDefinition,
     highlightAtPoint,
     refsAtPoint,
+    workspaceSymbols,
     getDependencies,
     getParsedModule,
     generateCore,
@@ -86,6 +87,10 @@ import System.Time.Extra
 import Control.Monad.Reader
 import System.Directory ( getModificationTime )
 import Control.Exception
+
+import OccName
+import qualified HieDb
+import Data.Char
 
 -- | This is useful for rules to convert rules that can only produce errors or
 -- a result into the more general IdeResult type that supports producing
@@ -159,6 +164,46 @@ refsAtPoint file pos = runMaybeT $ do
     (PRefMap rf,mapping) <- useE GetRefMap file
     !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
     AtPoint.referencesAtPoint hiedb hf rf pos'
+
+workspaceSymbols :: T.Text -> IdeAction (Maybe [SymbolInformation])
+workspaceSymbols query = do
+  hiedb <- hiedb <$> askShake
+  let q@(occ,mmod) = parseQuery query
+  ideLog $ ("Parsed:Query" ++ T.unpack (AtPoint.showName q) ++ T.unpack (AtPoint.showSD (pprNameSpace (occNameSpace occ))))
+  res <- liftIO $ HieDb.search hiedb occ mmod Nothing
+  pure $ Just $ map refRowToSymbolInfo res
+
+-- | parse a workspace symbols query
+-- Syntax: (value|type):<name> (module:<module>)?
+-- If it doesn't fit this syntax, its treated as a value
+parseQuery :: T.Text -> (OccName, Maybe ModuleName)
+parseQuery s = (occ,mkModuleName . T.unpack <$> mmod)
+  where
+    ws = T.words s
+    n = find isName ws
+    (ns,name) = case n of
+      Just (T.stripPrefix "type:" -> Just t) -> (tcClsName,t)
+      Just (T.stripPrefix "value:" -> Just v) ->
+        (if isCon v then dataName else varName,v)
+      _ -> (varName,s)
+    occ = mkOccName ns (T.unpack name)
+    mmod = T.stripPrefix "module:" =<< find isModule ws
+    isCon v = case T.uncons v of
+      Just (v,_) | isUpper v || v == ':' -> True
+      _ -> False
+    isName = liftA2 (||) ("type:" `T.isPrefixOf`) ("value:" `T.isPrefixOf`)
+    isModule = ("module:" `T.isPrefixOf`)
+
+refRowToSymbolInfo :: HieDb.RefRow -> SymbolInformation
+refRowToSymbolInfo row@HieDb.RefRow{..}
+  = SymbolInformation (AtPoint.showName refNameOcc) kind Nothing loc Nothing
+  where
+    kind
+      | isVarOcc refNameOcc = SkVariable
+      | isDataOcc refNameOcc = SkConstructor
+      | isTcOcc refNameOcc = SkStruct
+      | otherwise = SkUnknown 1
+    loc = AtPoint.rowToLoc row
 
 getHieFile
   :: IdeState

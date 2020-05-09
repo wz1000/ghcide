@@ -108,7 +108,9 @@ runWithDb fp k =
     --setTrace (getConn writedb) (Just $ T.appendFile "/tmp/sqltrace" . (<>"\n"))
     initConn writedb
     chan <- newChan
-    race_ (writerThread writedb chan) (withHieDb fp $ \readdb -> k readdb chan)
+    race_ (writerThread writedb chan) $ withHieDb fp $ \readdb -> do
+      setTrace (getConn readdb) (Just $ T.appendFile "/tmp/sqltrace" . (<>"\n"))
+      k readdb chan
   where
     writerThread db chan =forever $ do
       k <- readChan chan

@@ -9,6 +9,7 @@ module Development.IDE.LSP.HoverDefinition
     , setHandlersTypeDefinition
     , setHandlersDocHighlight
     , setHandlersReferences
+    , setHandlersWsSymbols
     -- * For haskell-language-server
     , hover
     , gotoDefinition
@@ -42,6 +43,11 @@ references ide (ReferenceParams (TextDocumentIdentifier uri) pos _ _) = do
     Nothing -> pure Nothing
   pure $ Right $ maybe (List []) List mbResult
 
+wsSymbols :: IdeState -> WorkspaceSymbolParams -> IO (Either ResponseError (List SymbolInformation))
+wsSymbols ide (WorkspaceSymbolParams query _) = do
+  logInfo (ideLogger ide) $ "Workspace symbols request: " <> query
+  runIdeAction "WorkspaceSymbols" ide $ (Right . maybe (List []) List) <$> (workspaceSymbols query)
+
 foundHover :: (Maybe Range, [T.Text]) -> Maybe Hover
 foundHover (mbRange, contents) =
   Just $ Hover (HoverContents $ MarkupContent MkMarkdown $ T.intercalate sectionSeparator contents) mbRange
@@ -58,6 +64,8 @@ setHandlersDocHighlight = PartialHandlers $ \WithMessage{..} x ->
   return x{LSP.documentHighlightHandler = withResponse RspDocumentHighlights $ const documentHighlight}
 setHandlersReferences = PartialHandlers $ \WithMessage{..} x ->
   return x{LSP.referencesHandler = withResponse RspFindReferences $ const references}
+setHandlersWsSymbols = PartialHandlers $ \WithMessage{..} x ->
+  return x{LSP.workspaceSymbolHandler = withResponse RspWorkspaceSymbols $ const wsSymbols}
 
 -- | Respond to and log a hover or go-to-definition request
 request

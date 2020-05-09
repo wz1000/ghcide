@@ -9,6 +9,9 @@ module Development.IDE.Spans.AtPoint (
   , gotoTypeDefinition
   , documentHighlight
   , referencesAtPoint
+  , showName
+  , showSD
+  , rowToLoc
   ) where
 
 import           Development.IDE.GHC.Error
@@ -43,6 +46,14 @@ import Data.Either
 
 import HieDb (HieDb, search,RefRow(..))
 
+rowToLoc :: RefRow -> Location
+rowToLoc row = Location file range
+  where
+    file = fromNormalizedUri $ filePathToUri' $ toNormalizedFilePath' $ refFile row
+    range = Range start end
+    start = Position (refSLine row - 1) (refSCol row -1)
+    end = Position (refELine row - 1) (refECol row -1)
+
 referencesAtPoint
   :: MonadIO m
   => HieDb
@@ -52,12 +63,6 @@ referencesAtPoint
   -> MaybeT m [Location]
 referencesAtPoint hiedb hf rf pos = do
   let names = concat $ pointCommand hf pos (rights . M.keys . nodeIdentifiers . nodeInfo)
-      rowToLoc row = Location file range
-        where
-          file = fromNormalizedUri $ filePathToUri' $ toNormalizedFilePath' $ refFile row
-          range = Range start end
-          start = Position (refSLine row - 1) (refSCol row -1)
-          end = Position (refELine row - 1) (refECol row -1)
   locs <- forM names $ \name ->
     case nameModule_maybe name of
       Nothing ->
@@ -211,8 +216,11 @@ pointCommand hf pos k =
    cha = _character pos
 
 showName :: Outputable a => a -> T.Text
-showName = T.pack . prettyprint
+showName = showSD . ppr
+
+showSD :: SDoc -> T.Text
+showSD = T.pack . prettyprint
   where
-    prettyprint x = renderWithStyle unsafeGlobalDynFlags (ppr x) style
+    prettyprint x = renderWithStyle unsafeGlobalDynFlags x style
     style = mkUserStyle unsafeGlobalDynFlags neverQualify AllTheWay
 
