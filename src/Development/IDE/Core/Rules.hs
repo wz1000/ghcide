@@ -108,6 +108,10 @@ defineNoFile f = define $ \k file -> do
     if file == emptyFilePath then do res <- f k; return ([], Just res) else
         fail $ "Rule " ++ show k ++ " should always be called with the empty string for a file"
 
+ideLog :: String -> IdeAction ()
+ideLog xs = do
+  logger <- ideLogger <$> ask
+  liftIO $ L.logDebug logger $ T.pack xs
 
 ------------------------------------------------------------
 -- Exposed API
@@ -157,6 +161,7 @@ getHieFile
   -> Module -- ^ module dep we want info for
   -> MaybeT IdeAction (HieFile, FilePath) -- ^ hie stuff for the module
 getHieFile ide file mod = do
+  lift $ ideLog $ "getHieFile["++show (file,mod)++"]"
   TransitiveDependencies {transitiveNamedModuleDeps} <- fst <$> useE GetDependencies file
   case find (\x -> nmdModuleName x == moduleName mod) transitiveNamedModuleDeps of
     Just NamedModuleDep{nmdFilePath=nfp} -> do
@@ -172,6 +177,7 @@ getHomeHieFile f = do
   case stale hfr of
     Just (hf,_) -> pure hf -- We already have the file
     Nothing -> do -- We don't have the file, so try loading it from disk
+      lift $ ideLog $ "getHieHomeFile["++show f++"] try to load file from disk"
       ms <- fst <$> useE GetModSummary f
 
       let normal_hie_f = toNormalizedFilePath' hie_f
@@ -180,11 +186,11 @@ getHomeHieFile f = do
       mbHieTimestamp <- either (\(_ :: IOException) -> Nothing) Just <$> (liftIO $ try $ getModificationTime hie_f)
       srcTimestamp   <- MaybeT (either (\(_ :: IOException) -> Nothing) Just <$> (liftIO $ try $ getModificationTime $ fromNormalizedFilePath f))
 
-      liftIO $ print (mbHieTimestamp, srcTimestamp, hie_f, normal_hie_f)
       let isUpToDate
             | Just d <- mbHieTimestamp = d > srcTimestamp
             | otherwise = False
 
+      lift $ ideLog $ show (mbHieTimestamp, srcTimestamp, hie_f, normal_hie_f, isUpToDate)
       if isUpToDate
         then do
           upd <- mkUpdater

@@ -47,7 +47,8 @@ module Development.IDE.Core.Shake(
     OnDiskRule(..),
 
     workerThread, delay, DelayedAction, mkDelayedAction,
-    IdeAction(..), runIdeAction, askShake, mkUpdater
+    IdeAction(..), runIdeAction, askShake, mkUpdater,
+    OfInterestVar(..), getFilesOfInterestUntracked
     ) where
 
 import           Development.Shake hiding (ShakeValue, doesFileExist, Info)
@@ -104,6 +105,10 @@ import Data.IORef
 import NameCache
 import UniqSupply
 import PrelInfo
+
+
+import Data.HashSet (HashSet)
+import qualified Data.HashSet as HashSet
 
 -- information we stash inside the shakeExtra field
 data ShakeExtras = ShakeExtras
@@ -162,6 +167,38 @@ getIdeGlobalAction = liftIO . getIdeGlobalExtras =<< getShakeExtras
 
 getIdeGlobalState :: forall a . IsIdeGlobal a => IdeState -> IO a
 getIdeGlobalState = getIdeGlobalExtras . shakeExtras
+
+newtype OfInterestVar = OfInterestVar (Var (HashSet NormalizedFilePath))
+instance IsIdeGlobal OfInterestVar
+
+getFilesOfInterestUntracked :: Action (HashSet NormalizedFilePath)
+getFilesOfInterestUntracked = do
+    OfInterestVar var <- getIdeGlobalAction
+    liftIO $ readVar var
+
+logActionStart :: IdeRule k v => String -> k -> [NormalizedFilePath] -> Action ()
+logActionStart label key fs = do
+  ifs <- getFilesOfInterestUntracked
+  logger <- actionLogger
+  when (any (`HashSet.member` ifs) fs) $
+    liftIO $ logDebug logger $ T.pack $ unwords ["STARTED",label,show key,"["++show fs++"]"]
+
+logActionEnd :: IdeRule k v => String -> k -> [NormalizedFilePath] -> [Maybe v] -> Action ()
+logActionEnd label key fs final_res = do
+  ifs <- getFilesOfInterestUntracked
+  logger <- actionLogger
+  when (any (`HashSet.member` ifs) fs) $
+    liftIO $ logDebug logger $ T.pack $ unwords ["FINISHED",label,show key,show fs,"=",take 100 $ show final_res]
+
+logIdeActionEnd :: IdeRule k v => String -> k -> [NormalizedFilePath] -> [Maybe v] -> IdeAction ()
+logIdeActionEnd label key fs final_res = do
+  se <- shakeExtras <$> ask
+  OfInterestVar var <- liftIO $ getIdeGlobalExtras se
+  ifs <- liftIO $ readVar var
+  logger <- ideLogger <$> ask
+  when (any (`HashSet.member` ifs) fs) $
+    liftIO $ logDebug logger $ T.pack $ unwords ["FINISHED",label,show key,show fs,"=",take 80 $ show final_res]
+
 
 
 -- | The state of the all values.
@@ -780,6 +817,7 @@ useWithStaleFast' key file = do
   -- keep updating the value in the key.
   --shakeRunInternal ("C:" ++ (show key)) ide [use key file]
   b <- liftIO $ newBarrier
+  logIdeActionEnd "useWithStaleFast'" key [file] [fst <$> final_res]
   delayedAction (mkDelayedAction ("C:" ++ (show key)) (key, file) Debug (use key file >>= liftIO . signalBarrier b))
   return (FastResult final_res b)
 
@@ -851,14 +889,21 @@ type instance RuleResult (Q k) = A (RuleResult k)
 -- | Return up2date results. Stale results will be ignored.
 uses :: IdeRule k v
     => k -> [NormalizedFilePath] -> Action [Maybe v]
-uses key files = map (\(A value _) -> currentValue value) <$> apply (map (Q . (key,)) files)
+uses key files = do
+  logActionStart "uses" key files
+  res <- map (\(A value _) -> currentValue value) <$> apply (map (Q . (key,)) files)
+  logActionEnd "uses" key files res
+  return res
 
 -- | Return the last computed result which might be stale.
 usesWithStale :: IdeRule k v
     => k -> [NormalizedFilePath] -> Action [Maybe (v, PositionMapping)]
 usesWithStale key files = do
+    logActionStart "usesWithStale" key files
     values <- map (\(A value _) -> value) <$> apply (map (Q . (key,)) files)
-    zipWithM lastValue files values
+    res <- zipWithM lastValue files values
+    logActionEnd "usesWithStale" key files (map (fmap fst) res)
+    return res
 
 
 withProgress :: (Eq a, Hashable a) => Var (HMap.HashMap a Int) -> a -> Action b -> Action b

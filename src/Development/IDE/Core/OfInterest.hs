@@ -31,9 +31,6 @@ import Development.IDE.Core.Shake
 import Development.IDE.Core.RuleTypes
 
 
-newtype OfInterestVar = OfInterestVar (Var (HashSet NormalizedFilePath))
-instance IsIdeGlobal OfInterestVar
-
 type instance RuleResult GetFilesOfInterest = HashSet NormalizedFilePath
 
 data GetFilesOfInterest = GetFilesOfInterest
@@ -57,8 +54,6 @@ ofInterestRules = do
 getFilesOfInterest :: Action (HashSet NormalizedFilePath)
 getFilesOfInterest = useNoFile_ GetFilesOfInterest
 
-
-
 ------------------------------------------------------------
 -- Exposed API
 
@@ -66,11 +61,6 @@ getFilesOfInterest = useNoFile_ GetFilesOfInterest
 --   The LSP client will keep this information up to date.
 setFilesOfInterest :: IdeState -> HashSet NormalizedFilePath -> IO ()
 setFilesOfInterest state files = modifyFilesOfInterest state (const files)
-
-getFilesOfInterestUntracked :: Action (HashSet NormalizedFilePath)
-getFilesOfInterestUntracked = do
-    OfInterestVar var <- getIdeGlobalAction
-    liftIO $ readVar var
 
 -- | Modify the files-of-interest - not usually necessary or advisable.
 --   The LSP client will keep this information up to date.
