@@ -1,4 +1,4 @@
-resolver: nightly-2020-02-13
+resolver: nightly-2020-05-16
 compiler: ghc-8.10.1
 allow-newer: true
 packages:
