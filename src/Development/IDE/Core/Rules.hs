@@ -168,42 +168,24 @@ refsAtPoint file pos = runMaybeT $ do
 workspaceSymbols :: T.Text -> IdeAction (Maybe [SymbolInformation])
 workspaceSymbols query = do
   hiedb <- hiedb <$> askShake
-  let q@(occ,mmod) = parseQuery query
-  ideLog $ ("Parsed:Query" ++ T.unpack (AtPoint.showName q) ++ T.unpack (AtPoint.showSD (pprNameSpace (occNameSpace occ))))
-  res <- liftIO $ HieDb.search hiedb occ mmod Nothing
-  pure $ Just $ map refRowToSymbolInfo res
+  res <- liftIO $ HieDb.searchDef hiedb $ T.unpack query
+  pure $ Just $ map defRowToSymbolInfo res
 
--- | parse a workspace symbols query
--- Syntax: (value|type):<name> (module:<module>)?
--- If it doesn't fit this syntax, its treated as a value
-parseQuery :: T.Text -> (OccName, Maybe ModuleName)
-parseQuery s = (occ,mkModuleName . T.unpack <$> mmod)
-  where
-    ws = T.words s
-    n = find isName ws
-    (ns,name) = case n of
-      Just (T.stripPrefix "type:" -> Just t) -> (tcClsName,t)
-      Just (T.stripPrefix "value:" -> Just v) ->
-        (if isCon v then dataName else varName,v)
-      _ -> (varName,s)
-    occ = mkOccName ns (T.unpack name)
-    mmod = T.stripPrefix "module:" =<< find isModule ws
-    isCon v = case T.uncons v of
-      Just (v,_) | isUpper v || v == ':' -> True
-      _ -> False
-    isName = liftA2 (||) ("type:" `T.isPrefixOf`) ("value:" `T.isPrefixOf`)
-    isModule = ("module:" `T.isPrefixOf`)
-
-refRowToSymbolInfo :: HieDb.RefRow -> SymbolInformation
-refRowToSymbolInfo row@HieDb.RefRow{..}
-  = SymbolInformation (AtPoint.showName refNameOcc) kind Nothing loc Nothing
+defRowToSymbolInfo :: HieDb.DefRow -> SymbolInformation
+defRowToSymbolInfo HieDb.DefRow{..}
+  = SymbolInformation (AtPoint.showName defNameOcc) kind Nothing loc Nothing
   where
     kind
-      | isVarOcc refNameOcc = SkVariable
-      | isDataOcc refNameOcc = SkConstructor
-      | isTcOcc refNameOcc = SkStruct
+      | isVarOcc defNameOcc = SkVariable
+      | isDataOcc defNameOcc = SkConstructor
+      | isTcOcc defNameOcc = SkStruct
       | otherwise = SkUnknown 1
-    loc = AtPoint.rowToLoc row
+    loc = Location file range
+      where
+        file  = fromNormalizedUri $ filePathToUri' $ toNormalizedFilePath' defFile
+        range = Range start end
+        start = Position (defSLine - 1) (defSCol - 1)
+        end   = Position (defELine - 1) (defECol - 1)
 
 getHieFile
   :: IdeState
