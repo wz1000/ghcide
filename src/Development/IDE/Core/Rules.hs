@@ -141,14 +141,16 @@ getDefinition file pos = runMaybeT $ do
     ide <- ask
     opts <- liftIO $ getIdeOptionsIO ide
     hf <- fst <$> useE GetHieFile file
-    AtPoint.gotoDefinition (getHieFile ide file) opts hf pos
+    hiedb <- lift $ hiedb <$> askShake
+    AtPoint.gotoDefinition hiedb opts hf pos
 
 getTypeDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe Location)
 getTypeDefinition file pos = runMaybeT $ do
     ide <- ask
     opts <- liftIO $ getIdeOptionsIO ide
     hf <- fst <$> useE GetHieFile file
-    AtPoint.gotoTypeDefinition (getHieFile ide file) opts hf pos
+    hiedb <- lift $ hiedb <$> askShake
+    AtPoint.gotoTypeDefinition hiedb opts hf pos
 
 highlightAtPoint :: NormalizedFilePath -> Position -> IdeAction (Maybe [DocumentHighlight])
 highlightAtPoint file pos = runMaybeT $ do
@@ -186,51 +188,6 @@ defRowToSymbolInfo HieDb.DefRow{..}
         range = Range start end
         start = Position (defSLine - 1) (defSCol - 1)
         end   = Position (defELine - 1) (defECol - 1)
-
-getHieFile
-  :: IdeState
-  -> NormalizedFilePath -- ^ file we're editing
-  -> Module -- ^ module dep we want info for
-  -> MaybeT IdeAction (HieFile, FilePath) -- ^ hie stuff for the module
-getHieFile ide file mod = do
-  TransitiveDependencies {transitiveNamedModuleDeps} <- fst <$> useE GetDependencies file
-  case find (\x -> nmdModuleName x == moduleName mod) transitiveNamedModuleDeps of
-    Just NamedModuleDep{nmdFilePath=nfp} -> do
-        let modPath = fromNormalizedFilePath nfp
-        hieFile <- getHomeHieFile nfp
-        return $ (hieFile, modPath)
-    _ -> getPackageHieFile ide mod file
-
-
-getHomeHieFile :: NormalizedFilePath -> MaybeT IdeAction HieFile
-getHomeHieFile f = do
-  hfr <- lift $ useWithStaleFast' GetHieFile f
-  case stale hfr of
-    Just (hf,_) -> pure hf -- We already have the file
-    Nothing -> do -- We don't have the file, so try loading it from disk
-      ms <- fst <$> useE GetModSummary f
-
-      let normal_hie_f = toNormalizedFilePath' hie_f
-          hie_f = ml_hie_file $ ms_location ms
-
-      mbHieTimestamp <- either (\(_ :: IOException) -> Nothing) Just <$> (liftIO $ try $ getModificationTime hie_f)
-      srcTimestamp   <- MaybeT (either (\(_ :: IOException) -> Nothing) Just <$> (liftIO $ try $ getModificationTime $ fromNormalizedFilePath f))
-
-      liftIO $ print (mbHieTimestamp, srcTimestamp, hie_f, normal_hie_f)
-      let isUpToDate
-            | Just d <- mbHieTimestamp = d > srcTimestamp
-            | otherwise = False
-
-      if isUpToDate
-        then do
-          upd <- mkUpdater
-          hf <- liftIO $ if isUpToDate then Just <$> loadHieFile upd hie_f else pure Nothing
-          MaybeT $ return hf
-        else do
-          -- If not on disk, wait for the barrier
-          -- Could block here with a barrier rather than fail
-          mhf <- liftIO $ timeout 1 $ waitBarrier (uptoDate hfr)
-          MaybeT $ pure $ join mhf
 
 
 getPackageHieFile :: IdeState
