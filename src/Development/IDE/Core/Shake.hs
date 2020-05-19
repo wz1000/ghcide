@@ -613,7 +613,9 @@ shakeShut IdeState{..} = withMVar shakeAbort $ \stop -> do
 -- finished running. For example, to trigger a key build after a rule
 -- has already finished as is the case with useWithStaleFast
 delayedAction :: DelayedAction () -> IdeAction ()
-delayedAction a = tell [a]
+delayedAction a = do
+  sq <- shakeQueue <$> ask
+  void $ liftIO $ queueAction [a] sq
 
 -- | A varient of delayedAction for the Action monad
 -- The supplied action *will* be run but at least not until the current action has finished.
@@ -734,13 +736,12 @@ useWithStale :: IdeRule k v
     => k -> NormalizedFilePath -> Action (Maybe (v, PositionMapping))
 useWithStale key file = head <$> usesWithStale key [file]
 
-newtype IdeAction a = IdeAction { runIdeActionT  :: WriterT [DelayedAction ()] (ReaderT IdeState IO) a }
-    deriving (MonadReader IdeState, MonadWriter [DelayedAction ()], MonadIO, Functor, Applicative, Monad)
+newtype IdeAction a = IdeAction { runIdeActionT  :: (ReaderT IdeState IO) a }
+    deriving (MonadReader IdeState, MonadIO, Functor, Applicative, Monad)
 
 runIdeAction :: String -> IdeState -> IdeAction a -> IO a
 runIdeAction _herald s i = do
-    (res, ws) <- runReaderT (runWriterT (runIdeActionT i)) s
-    shakeRunInternal s ws
+    res <- runReaderT (runIdeActionT i) s
     return res
 
 askShake :: IdeAction ShakeExtras
