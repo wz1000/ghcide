@@ -39,6 +39,7 @@ setHandlersNotifications = PartialHandlers $ \WithMessage{..} x -> return x
             updatePositionMapping ide (VersionedTextDocumentIdentifier _uri (Just _version)) (List [])
             whenUriFile _uri $ \file -> do
                 modifyFilesOfInterest ide (S.insert file)
+                setFileModified ide False file
                 logInfo (ideLogger ide) $ "Opened text document: " <> getUri _uri
 
     ,LSP.didChangeTextDocumentNotificationHandler = withNotification (LSP.didChangeTextDocumentNotificationHandler x) $
