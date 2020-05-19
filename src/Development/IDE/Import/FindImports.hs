@@ -83,7 +83,7 @@ mkImportDirs :: (M.InstalledUnitId, DynFlags) -> (PackageName, [FilePath])
 mkImportDirs (i, df@DynFlags{importPaths}) = (pn , importPaths)
   where
     pn = case getPackageName df i of
-           Nothing -> error "very bad"
+           Nothing -> error ("mkImportDirs: " ++ show i)
            Just n -> n
 
 -- | locate a module in either the file system or the package database. Where we go from *daml to
