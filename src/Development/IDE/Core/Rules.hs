@@ -86,11 +86,18 @@ import Control.Concurrent.Extra
 import System.Time.Extra
 import Control.Monad.Reader
 import System.Directory ( getModificationTime )
+import qualified System.Directory as Dir
 import Control.Exception
 
 import OccName
 import qualified HieDb
 import Data.Char
+
+import Module (toInstalledUnitId)
+import Packages
+
+import System.IO
+
 
 -- | This is useful for rules to convert rules that can only produce errors or
 -- a result into the more general IdeResult type that supports producing
@@ -135,22 +142,47 @@ getAtPoint file pos = fmap join $ runMaybeT $ do
   !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
   return $ AtPoint.atPoint opts hf dm pos'
 
+lookupMod :: DynFlags -> IdeOptions -> ModuleName -> UnitId -> IdeAction (Maybe Uri)
+lookupMod dflags opts mn uid
+ | toInstalledUnitId uid == thisInstalledUnitId dflags = do
+      f <- locateModuleFile [importPaths dflags] (optExtensions opts) doesExist False mn
+      pure $ (fromNormalizedUri . filePathToUri') <$> f
+  | otherwise = do
+    let mp = lookupPackage dflags uid
+    case mp of
+      Nothing -> pure Nothing
+      Just (packageName -> PackageName p) ->
+        case lookupModuleWithSuggestions dflags mn (Just p) of
+          _ -> error "Goto def for package deps not implemented"
+  where
+    doesExist f = do
+      e <- useWithStaleFast' GetFileExists f
+      case stale e of
+        Just r -> pure (fst r)
+        Nothing -> liftIO $ do
+          hPutStrLn stderr "WAITING FOR BARRIER *********************"
+          r <- waitBarrier (uptoDate e)
+          maybe (Dir.doesFileExist $ fromNormalizedFilePath f) pure r
+
 -- | Goto Definition.
 getDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe Location)
 getDefinition file pos = runMaybeT $ do
     ide <- ask
     opts <- liftIO $ getIdeOptionsIO ide
     hf <- fst <$> useE GetHieFile file
+    sess <- hscEnv . fst <$> useE GhcSession file
     hiedb <- lift $ hiedb <$> askShake
-    AtPoint.gotoDefinition hiedb opts hf pos
+    liftIO $ L.logInfo (ideLogger ide) $ "Got HieFile ###########"
+    AtPoint.gotoDefinition hiedb (lookupMod (hsc_dflags sess) opts) opts hf pos
 
 getTypeDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe Location)
 getTypeDefinition file pos = runMaybeT $ do
     ide <- ask
     opts <- liftIO $ getIdeOptionsIO ide
     hf <- fst <$> useE GetHieFile file
+    sess <- hscEnv . fst <$> useE GhcSession file
     hiedb <- lift $ hiedb <$> askShake
-    AtPoint.gotoTypeDefinition hiedb opts hf pos
+    AtPoint.gotoTypeDefinition hiedb (lookupMod (hsc_dflags sess) opts) opts hf pos
 
 highlightAtPoint :: NormalizedFilePath -> Position -> IdeAction (Maybe [DocumentHighlight])
 highlightAtPoint file pos = runMaybeT $ do
@@ -161,11 +193,13 @@ highlightAtPoint file pos = runMaybeT $ do
 
 refsAtPoint :: NormalizedFilePath -> Position -> IdeAction (Maybe [Location])
 refsAtPoint file pos = runMaybeT $ do
+    opts <- liftIO . getIdeOptionsIO =<< ask
     hf <- fst <$> useE GetHieFile file
     hiedb <- lift $ hiedb <$> askShake
     (PRefMap rf,mapping) <- useE GetRefMap file
+    sess <- hscEnv . fst <$> useE GhcSession file
     !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
-    AtPoint.referencesAtPoint hiedb hf rf pos'
+    AtPoint.referencesAtPoint hiedb (lookupMod (hsc_dflags sess) opts) hf rf pos'
 
 workspaceSymbols :: T.Text -> IdeAction (Maybe [SymbolInformation])
 workspaceSymbols query = do
@@ -188,29 +222,6 @@ defRowToSymbolInfo HieDb.DefRow{..}
         range = Range start end
         start = Position (defSLine - 1) (defSCol - 1)
         end   = Position (defELine - 1) (defECol - 1)
-
-
-getPackageHieFile :: IdeState
-                  -> Module             -- ^ Package Module to load .hie file for
-                  -> NormalizedFilePath -- ^ Path of home module importing the package module
-                  -> MaybeT IdeAction (HieFile, FilePath)
-getPackageHieFile ide mod file = do
-    pkgState  <- hscEnv . fst <$> useE GhcSession file
-    IdeOptions {..} <- liftIO $ getIdeOptionsIO ide
-    let unitId = moduleUnitId mod
-    case lookupPackageConfig unitId pkgState of
-        Just pkgConfig -> do
-            -- 'optLocateHieFile' returns Nothing if the file does not exist
-            hieFile <- liftIO $ optLocateHieFile optPkgLocationOpts pkgConfig mod
-            path    <- liftIO $ optLocateSrcFile optPkgLocationOpts pkgConfig mod
-            case (hieFile, path) of
-                (Just hiePath, Just modPath) -> do
-                    -- deliberately loaded outside the Shake graph
-                    -- to avoid dependencies on non-workspace files
-                        ncu <- mkUpdater
-                        MaybeT $ liftIO $ Just . (, modPath) <$> loadHieFile ncu hiePath
-                _ -> MaybeT $ return Nothing
-        _ -> MaybeT $ return Nothing
 
 -- | Parse the contents of a daml file.
 getParsedModule :: NormalizedFilePath -> Action (Maybe ParsedModule)

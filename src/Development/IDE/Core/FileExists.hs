@@ -5,6 +5,7 @@ module Development.IDE.Core.FileExists
   ( fileExistsRules
   , modifyFileExists
   , getFileExists
+  , GetFileExists(..)
   )
 where
 

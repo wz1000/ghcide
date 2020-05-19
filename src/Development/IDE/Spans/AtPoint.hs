@@ -32,6 +32,7 @@ import Module
 
 import Control.Monad.Extra
 import Control.Monad.Trans.Maybe
+import Control.Monad.Trans.Class
 import Control.Monad.IO.Class
 import           Data.Maybe
 import           Data.List
@@ -45,12 +46,13 @@ import Data.Either
 
 import HieDb (HieDb, search,RefRow(..), findOneDef, DefRow(..))
 
-rowToLoc :: RefRow -> Maybe Location
-rowToLoc row
-  | refSrcUnit row == stringToUnitId "fake_uid" = Just $ Location file range
-  | otherwise = Nothing
+type LookupModule m = ModuleName -> UnitId -> m (Maybe Uri)
+
+rowToLoc :: Monad m => LookupModule m -> RefRow -> m (Maybe Location)
+rowToLoc lookupModule row = do
+  mfile <- lookupModule (refSrcMod row) (refSrcUnit row)
+  pure $ flip Location range <$> mfile
   where
-    file = fromNormalizedUri $ filePathToUri' $ toNormalizedFilePath' $ refFile row
     range = Range start end
     start = Position (refSLine row - 1) (refSCol row -1)
     end = Position (refELine row - 1) (refECol row -1)
@@ -58,11 +60,12 @@ rowToLoc row
 referencesAtPoint
   :: MonadIO m
   => HieDb
+  -> LookupModule m
   -> HieFile
   -> RefMap
   -> Position
   -> MaybeT m [Location]
-referencesAtPoint hiedb hf rf pos = do
+referencesAtPoint hiedb lookupModule hf rf pos = do
   let names = concat $ pointCommand hf pos (rights . M.keys . nodeIdentifiers . nodeInfo)
   locs <- forM names $ \name ->
     case nameModule_maybe name of
@@ -70,7 +73,7 @@ referencesAtPoint hiedb hf rf pos = do
         pure $ maybe [] (map $ srcSpanToLocation . RealSrcSpan . fst) $ M.lookup (Right name) rf
       Just mod -> do
          rows <- liftIO $ search hiedb (nameOccName name) (Just $ moduleName mod) (Just $ moduleUnitId mod)
-         pure $ mapMaybe rowToLoc rows
+         lift $ mapMaybeM (rowToLoc lookupModule) rows
   pure $ concat locs
 
 documentHighlight
@@ -96,23 +99,25 @@ documentHighlight hf rf pos = MaybeT $ pure (Just highlights)
 gotoTypeDefinition
   :: MonadIO m
   => HieDb
+  -> LookupModule m
   -> IdeOptions
   -> HieFile
   -> Position
   -> MaybeT m Location
-gotoTypeDefinition hiedb ideOpts srcSpans pos
-  = MaybeT (listToMaybe <$> typeLocationsAtPoint hiedb ideOpts pos srcSpans)
+gotoTypeDefinition hiedb lookupModule ideOpts srcSpans pos
+  = MaybeT (listToMaybe <$> typeLocationsAtPoint hiedb lookupModule ideOpts pos srcSpans)
 
 -- | Locate the definition of the name at a given position.
 gotoDefinition
   :: MonadIO m
   => HieDb
+  -> LookupModule m
   -> IdeOptions
   -> HieFile
   -> Position
   -> MaybeT m Location
-gotoDefinition hiedb ideOpts srcSpans pos =
-  MaybeT (listToMaybe <$> locationsAtPoint hiedb ideOpts pos srcSpans)
+gotoDefinition hiedb lookupModule ideOpts srcSpans pos =
+  MaybeT (listToMaybe <$> locationsAtPoint hiedb lookupModule ideOpts pos srcSpans)
 
 -- | Synopsis for the name at a given position.
 atPoint
@@ -153,11 +158,12 @@ typeLocationsAtPoint
   :: forall m
    . MonadIO m
   => HieDb
+  -> LookupModule m
   -> IdeOptions
   -> Position
   -> HieFile
   -> m [Location]
-typeLocationsAtPoint hiedb _ideOptions pos ast =
+typeLocationsAtPoint hiedb lookupModule _ideOptions pos ast =
   let ts = concat $ pointCommand ast pos (nodeType . nodeInfo)
       arr = hie_types ast
       its = map (arr A.!) ts
@@ -165,23 +171,24 @@ typeLocationsAtPoint hiedb _ideOptions pos ast =
         HTyConApp tc _ -> Just $ ifaceTyConName tc
         HTyVarTy n -> Just n
         _ -> Nothing
-    in mapMaybeM (nameToLocation hiedb) ns
+    in mapMaybeM (nameToLocation hiedb lookupModule) ns
 
 locationsAtPoint
   :: forall m
    . MonadIO m
   => HieDb
+  -> LookupModule m
   -> IdeOptions
   -> Position
   -> HieFile
   -> m [Location]
-locationsAtPoint hiedb _ideOptions pos ast =
+locationsAtPoint hiedb lookupModule _ideOptions pos ast =
   let ns = concat $ pointCommand ast pos (rights . M.keys . nodeIdentifiers . nodeInfo)
-    in mapMaybeM (nameToLocation hiedb) ns
+    in mapMaybeM (nameToLocation hiedb lookupModule) ns
 
 -- | Given a 'Name' attempt to find the location where it is defined.
-nameToLocation :: MonadIO m => HieDb -> Name -> m (Maybe Location)
-nameToLocation hiedb name =
+nameToLocation :: MonadIO m => HieDb -> LookupModule m -> Name -> m (Maybe Location)
+nameToLocation hiedb lookupModule name =
   case nameSrcSpan name of
     sp@(RealSrcSpan _) -> pure $ srcSpanToLocationMaybe sp
     sp@(UnhelpfulSpan _) -> runMaybeT $ do
@@ -197,10 +204,7 @@ nameToLocation hiedb name =
           let start = Position (defSLine row - 1) (defSCol row - 1)
               end = Position (defELine row - 1) (defECol row - 1)
               range = Range start end
-          file <-
-            if defUnit row == stringToUnitId "fake_uid"
-            then pure $ fromNormalizedUri $ filePathToUri' $ toNormalizedFilePath' $ defFile row
-            else MaybeT $ pure Nothing
+          file <- MaybeT $ lookupModule (defMod row) (defUnit row)
           pure $ Location file range
 
 pointCommand :: HieFile -> Position -> (HieAST TypeIndex -> a) -> [a]
