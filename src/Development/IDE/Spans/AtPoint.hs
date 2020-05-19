@@ -10,8 +10,6 @@ module Development.IDE.Spans.AtPoint (
   , documentHighlight
   , referencesAtPoint
   , showName
-  , showSD
-  , rowToLoc
   ) where
 
 import           Development.IDE.GHC.Error
@@ -30,6 +28,7 @@ import FastString
 import Name
 import Outputable hiding ((<>))
 import SrcLoc
+import Module
 
 import Control.Monad.Extra
 import Control.Monad.Trans.Maybe
@@ -44,10 +43,12 @@ import qualified Data.Array as A
 import IfaceType
 import Data.Either
 
-import HieDb (HieDb, search,RefRow(..))
+import HieDb (HieDb, search,RefRow(..), findOneDef, DefRow(..))
 
-rowToLoc :: RefRow -> Location
-rowToLoc row = Location file range
+rowToLoc :: RefRow -> Maybe Location
+rowToLoc row
+  | refSrcUnit row == stringToUnitId "fake_uid" = Just $ Location file range
+  | otherwise = Nothing
   where
     file = fromNormalizedUri $ filePathToUri' $ toNormalizedFilePath' $ refFile row
     range = Range start end
@@ -69,7 +70,7 @@ referencesAtPoint hiedb hf rf pos = do
         pure $ maybe [] (map $ srcSpanToLocation . RealSrcSpan . fst) $ M.lookup (Right name) rf
       Just mod -> do
          rows <- liftIO $ search hiedb (nameOccName name) (Just $ moduleName mod) (Just $ moduleUnitId mod)
-         pure $ map rowToLoc rows
+         pure $ mapMaybe rowToLoc rows
   pure $ concat locs
 
 documentHighlight
@@ -94,24 +95,24 @@ documentHighlight hf rf pos = MaybeT $ pure (Just highlights)
 
 gotoTypeDefinition
   :: MonadIO m
-  => (Module -> MaybeT m (HieFile, FilePath))
+  => HieDb
   -> IdeOptions
   -> HieFile
   -> Position
   -> MaybeT m Location
-gotoTypeDefinition getHieFile ideOpts srcSpans pos
-  = MaybeT (listToMaybe <$> typeLocationsAtPoint getHieFile ideOpts pos srcSpans)
+gotoTypeDefinition hiedb ideOpts srcSpans pos
+  = MaybeT (listToMaybe <$> typeLocationsAtPoint hiedb ideOpts pos srcSpans)
 
 -- | Locate the definition of the name at a given position.
 gotoDefinition
   :: MonadIO m
-  => (Module -> MaybeT m (HieFile, FilePath))
+  => HieDb
   -> IdeOptions
   -> HieFile
   -> Position
   -> MaybeT m Location
-gotoDefinition getHieFile ideOpts srcSpans pos =
-  MaybeT (listToMaybe <$> locationsAtPoint getHieFile ideOpts pos srcSpans)
+gotoDefinition hiedb ideOpts srcSpans pos =
+  MaybeT (listToMaybe <$> locationsAtPoint hiedb ideOpts pos srcSpans)
 
 -- | Synopsis for the name at a given position.
 atPoint
@@ -151,12 +152,12 @@ atPoint IdeOptions{} hf dm pos = listToMaybe $ pointCommand hf pos hoverInfo
 typeLocationsAtPoint
   :: forall m
    . MonadIO m
-  => (Module -> MaybeT m (HieFile, FilePath))
+  => HieDb
   -> IdeOptions
   -> Position
   -> HieFile
   -> m [Location]
-typeLocationsAtPoint getHieFile _ideOptions pos ast =
+typeLocationsAtPoint hiedb _ideOptions pos ast =
   let ts = concat $ pointCommand ast pos (nodeType . nodeInfo)
       arr = hie_types ast
       its = map (arr A.!) ts
@@ -164,44 +165,43 @@ typeLocationsAtPoint getHieFile _ideOptions pos ast =
         HTyConApp tc _ -> Just $ ifaceTyConName tc
         HTyVarTy n -> Just n
         _ -> Nothing
-    in mapMaybeM (nameToLocation getHieFile) ns
+    in mapMaybeM (nameToLocation hiedb) ns
 
 locationsAtPoint
   :: forall m
    . MonadIO m
-  => (Module -> MaybeT m (HieFile, FilePath))
+  => HieDb
   -> IdeOptions
   -> Position
   -> HieFile
   -> m [Location]
-locationsAtPoint getHieFile _ideOptions pos ast =
+locationsAtPoint hiedb _ideOptions pos ast =
   let ns = concat $ pointCommand ast pos (rights . M.keys . nodeIdentifiers . nodeInfo)
-    in mapMaybeM (nameToLocation getHieFile) ns
+    in mapMaybeM (nameToLocation hiedb) ns
 
 -- | Given a 'Name' attempt to find the location where it is defined.
-nameToLocation :: Monad f => (Module -> MaybeT f (HieFile, String)) -> Name -> f (Maybe Location)
-nameToLocation getHieFile name = fmap (srcSpanToLocationMaybe =<<) $
-              case nameSrcSpan name of
-                sp@(RealSrcSpan _) -> pure $ Just sp
-                sp@(UnhelpfulSpan _) -> runMaybeT $ do
-                  guard (sp /= wiredInSrcSpan)
-                  -- This case usually arises when the definition is in an external package.
-                  -- In this case the interface files contain garbage source spans
-                  -- so we instead read the .hie files to get useful source spans.
-                  mod <- MaybeT $ return $ nameModule_maybe name
-                  (hieFile, srcPath) <- getHieFile mod
-                  avail <- MaybeT $ pure $ find (eqName name . snd) $ hieExportNames hieFile
-                  -- The location will point to the source file used during compilation.
-                  -- This file might no longer exists and even if it does the path will be relative
-                  -- to the compilation directory which we don’t know.
-                  let span = setFileName srcPath $ fst avail
-                  pure span
-  where
-    -- We ignore uniques and source spans and only compare the name and the module.
-    eqName :: Name -> Name -> Bool
-    eqName n n' = nameOccName n == nameOccName n' && nameModule_maybe n == nameModule_maybe n'
-    setFileName f (RealSrcSpan span) = RealSrcSpan (span { srcSpanFile = mkFastString f })
-    setFileName _ span@(UnhelpfulSpan _) = span
+nameToLocation :: MonadIO m => HieDb -> Name -> m (Maybe Location)
+nameToLocation hiedb name =
+  case nameSrcSpan name of
+    sp@(RealSrcSpan _) -> pure $ srcSpanToLocationMaybe sp
+    sp@(UnhelpfulSpan _) -> runMaybeT $ do
+      guard (sp /= wiredInSrcSpan)
+      -- This case usually arises when the definition is in an external package.
+      -- In this case the interface files contain garbage source spans
+      -- so we instead read the .hie files to get useful source spans.
+      mod <- MaybeT $ return $ nameModule_maybe name
+      erow <- liftIO $ findOneDef hiedb (nameOccName name) (moduleName mod) (Just $ moduleUnitId mod)
+      case erow of
+        Left _ -> MaybeT $ pure Nothing
+        Right row -> do
+          let start = Position (defSLine row - 1) (defSCol row - 1)
+              end = Position (defELine row - 1) (defECol row - 1)
+              range = Range start end
+          file <-
+            if defUnit row == stringToUnitId "fake_uid"
+            then pure $ fromNormalizedUri $ filePathToUri' $ toNormalizedFilePath' $ defFile row
+            else MaybeT $ pure Nothing
+          pure $ Location file range
 
 pointCommand :: HieFile -> Position -> (HieAST TypeIndex -> a) -> [a]
 pointCommand hf pos k =
