@@ -66,7 +66,7 @@ import           LoadIface                      (readIface)
 import qualified Maybes
 import           MkIface
 import           StringBuffer                   as SB
-import           TcRnMonad (initIfaceLoad, tcg_th_coreplugins)
+import           TcRnMonad (initIfaceLoad, tcg_th_coreplugins, tcg_src)
 import           TcIface                        (typecheckIface)
 import           TidyPgm
 
@@ -301,8 +301,10 @@ generateAndWriteHieFile hscEnv hiechan tcm =
       Just rnsrc -> do
         hf <- runHsc hscEnv $
           GHC.mkHieFile mod_summary (fst $ tm_internals_ tcm) rnsrc ""
-        atomicFileWrite targetPath $ flip GHC.writeHieFile hf
-        addHieFileToDb hiechan targetPath hf
+        -- Don't save hie files for .boot
+        when (tcg_src (fst $ tm_internals_ tcm) == HsSrcFile) $ do
+          atomicFileWrite targetPath $ flip GHC.writeHieFile hf
+          addHieFileToDb hiechan targetPath hf
         pure (Just hf)
       _ ->
         return Nothing
