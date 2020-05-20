@@ -162,6 +162,7 @@ lookupMod dflags opts mn uid
         Nothing -> liftIO $ do
           hPutStrLn stderr "WAITING FOR BARRIER *********************"
           r <- waitBarrier (uptoDate e)
+          hPutStrLn stderr "BARRIER ENDED *********************"
           maybe (Dir.doesFileExist $ fromNormalizedFilePath f) pure r
 
 -- | Goto Definition.
@@ -191,11 +192,23 @@ highlightAtPoint file pos = runMaybeT $ do
     !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
     AtPoint.documentHighlight hf rf pos'
 
+reportDbState :: HieDb.HieDb -> MaybeT IdeAction ()
+reportDbState hiedb = do
+  ide <- ask
+  imods <- liftIO $ map HieDb.hieModule <$> HieDb.getAllIndexedMods hiedb
+  mg <- fst <$> useE GetModuleGraph emptyFilePath
+  let mods = nub $ map showableModuleName $ IntMap.elems $ depModuleNames mg
+  liftIO $ L.logInfo (ideLogger ide) $ T.pack $ "Modules in graph but not indexed: " ++ show (map ShowableModuleName (mods \\ imods))
+  pure ()
+
 refsAtPoint :: NormalizedFilePath -> Position -> IdeAction (Maybe [Location])
 refsAtPoint file pos = runMaybeT $ do
-    opts <- liftIO . getIdeOptionsIO =<< ask
-    hf <- fst <$> useE GetHieFile file
     hiedb <- lift $ hiedb <$> askShake
+    _ <- lift $ runMaybeT $ reportDbState hiedb
+
+    opts <- liftIO . getIdeOptionsIO =<< ask
+
+    hf <- fst <$> useE GetHieFile file
     (PRefMap rf,mapping) <- useE GetRefMap file
     sess <- hscEnv . fst <$> useE GhcSession file
     !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
