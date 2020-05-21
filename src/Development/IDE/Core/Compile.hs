@@ -302,9 +302,8 @@ generateAndWriteHieFile hscEnv hiechan tcm =
         hf <- runHsc hscEnv $
           GHC.mkHieFile mod_summary (fst $ tm_internals_ tcm) rnsrc ""
         -- Don't save hie files for .boot
-        when (tcg_src (fst $ tm_internals_ tcm) == HsSrcFile) $ do
-          atomicFileWrite targetPath $ flip GHC.writeHieFile hf
-          addHieFileToDb hiechan targetPath hf
+        atomicFileWrite targetPath $ flip GHC.writeHieFile hf
+        addHieFileToDb hiechan targetPath hf
         pure (Just hf)
       _ ->
         return Nothing
@@ -312,7 +311,10 @@ generateAndWriteHieFile hscEnv hiechan tcm =
     dflags       = hsc_dflags hscEnv
     mod_summary  = pm_mod_summary $ tm_parsed_module tcm
     mod_location = ms_location mod_summary
-    targetPath   = Compat.ml_hie_file mod_location
+    targetPath   = withBootSuffix $ Compat.ml_hie_file mod_location
+    withBootSuffix = case ms_hsc_src mod_summary of
+      HsBootFile -> addBootSuffix
+      _ -> id
 
 generateAndWriteHiFile :: HscEnv -> TcModuleResult -> IO [FileDiagnostic]
 generateAndWriteHiFile hscEnv tc =
