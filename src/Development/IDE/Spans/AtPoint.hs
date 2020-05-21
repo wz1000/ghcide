@@ -10,6 +10,7 @@ module Development.IDE.Spans.AtPoint (
   , documentHighlight
   , referencesAtPoint
   , showName
+  , defRowToSymbolInfo
   ) where
 
 import           Development.IDE.GHC.Error
@@ -44,13 +45,13 @@ import qualified Data.Array as A
 import IfaceType
 import Data.Either
 
-import HieDb (HieDb, search,RefRow(..), findOneDef, DefRow(..))
+import HieDb (HieDb, search,RefRow(..), findOneDef, DefRow(..), Res, (:.)(..),ModuleInfo(..))
 
-type LookupModule m = ModuleName -> UnitId -> m (Maybe Uri)
+type LookupModule m = ModuleName -> UnitId -> Bool -> MaybeT m Uri
 
-rowToLoc :: Monad m => LookupModule m -> RefRow -> m (Maybe Location)
-rowToLoc lookupModule row = do
-  mfile <- lookupModule (refSrcMod row) (refSrcUnit row)
+rowToLoc :: Monad m => LookupModule m -> Res RefRow -> m (Maybe Location)
+rowToLoc lookupModule (row:.info) = do
+  mfile <- runMaybeT $ lookupModule (modInfoName info) (modInfoUid info) (modInfoIsBoot info)
   pure $ flip Location range <$> mfile
   where
     range = Range start end
@@ -82,7 +83,7 @@ documentHighlight
   -> RefMap
   -> Position
   -> MaybeT m [DocumentHighlight]
-documentHighlight hf rf pos = MaybeT $ pure (Just highlights)
+documentHighlight hf rf pos = pure highlights
   where
     ns = concat $ pointCommand hf pos (rights . M.keys . nodeIdentifiers . nodeInfo)
     highlights = do
@@ -188,10 +189,10 @@ locationsAtPoint hiedb lookupModule _ideOptions pos ast =
 
 -- | Given a 'Name' attempt to find the location where it is defined.
 nameToLocation :: MonadIO m => HieDb -> LookupModule m -> Name -> m (Maybe Location)
-nameToLocation hiedb lookupModule name =
+nameToLocation hiedb lookupModule name = runMaybeT $
   case nameSrcSpan name of
-    sp@(RealSrcSpan _) -> pure $ srcSpanToLocationMaybe sp
-    sp@(UnhelpfulSpan _) -> runMaybeT $ do
+    sp@(RealSrcSpan _) -> MaybeT $ pure $ srcSpanToLocationMaybe sp
+    sp@(UnhelpfulSpan _) -> do
       guard (sp /= wiredInSrcSpan)
       -- This case usually arises when the definition is in an external package.
       -- In this case the interface files contain garbage source spans
@@ -200,12 +201,26 @@ nameToLocation hiedb lookupModule name =
       erow <- liftIO $ findOneDef hiedb (nameOccName name) (moduleName mod) (Just $ moduleUnitId mod)
       case erow of
         Left _ -> MaybeT $ pure Nothing
-        Right row -> do
-          let start = Position (defSLine row - 1) (defSCol row - 1)
-              end = Position (defELine row - 1) (defECol row - 1)
-              range = Range start end
-          file <- MaybeT $ lookupModule (defMod row) (defUnit row)
-          pure $ Location file range
+        Right x -> defRowToLocation lookupModule x
+
+defRowToLocation :: Monad m => LookupModule m -> Res DefRow -> MaybeT m Location
+defRowToLocation lookupModule (row:.info) = do
+  let start = Position (defSLine row - 1) (defSCol row - 1)
+      end = Position (defELine row - 1) (defECol row - 1)
+      range = Range start end
+  file <- lookupModule (modInfoName info) (modInfoUid info) (modInfoIsBoot info)
+  pure $ Location file range
+
+defRowToSymbolInfo :: Monad m => LookupModule m -> Res DefRow -> m (Maybe SymbolInformation)
+defRowToSymbolInfo lookupModule row@(DefRow{defNameOcc}:._) = runMaybeT $ do
+    loc <- defRowToLocation lookupModule row
+    pure $ SymbolInformation (showName defNameOcc) kind Nothing loc Nothing
+  where
+    kind
+      | isVarOcc defNameOcc = SkVariable
+      | isDataOcc defNameOcc = SkConstructor
+      | isTcOcc defNameOcc = SkStruct
+      | otherwise = SkUnknown 1
 
 pointCommand :: HieFile -> Position -> (HieAST TypeIndex -> a) -> [a]
 pointCommand hf pos k =

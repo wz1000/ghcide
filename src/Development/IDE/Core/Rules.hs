@@ -142,12 +142,12 @@ getAtPoint file pos = fmap join $ runMaybeT $ do
   !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
   return $ AtPoint.atPoint opts hf dm pos'
 
-lookupMod :: DynFlags -> IdeOptions -> ModuleName -> UnitId -> IdeAction (Maybe Uri)
-lookupMod dflags opts mn uid
+lookupMod :: DynFlags -> IdeOptions -> ModuleName -> UnitId -> Bool -> MaybeT IdeAction Uri
+lookupMod dflags opts mn uid isBoot
  | toInstalledUnitId uid == thisInstalledUnitId dflags = do
-      f <- locateModuleFile [importPaths dflags] (optExtensions opts) doesExist False mn
-      pure $ (fromNormalizedUri . filePathToUri') <$> f
-  | otherwise = do
+      f <- MaybeT $ locateModuleFile [importPaths dflags] (optExtensions opts) doesExist isBoot mn
+      pure $ fromNormalizedUri . filePathToUri' $ f
+  | otherwise = MaybeT $ do
     let mp = lookupPackage dflags uid
     case mp of
       Nothing -> pure Nothing
@@ -195,7 +195,7 @@ highlightAtPoint file pos = runMaybeT $ do
 reportDbState :: HieDb.HieDb -> MaybeT IdeAction ()
 reportDbState hiedb = do
   ide <- ask
-  imods <- liftIO $ map HieDb.hieModule <$> HieDb.getAllIndexedMods hiedb
+  imods <- liftIO $ map (HieDb.modInfoName . HieDb.hieModInfo) <$> HieDb.getAllIndexedMods hiedb
   mg <- fst <$> useE GetModuleGraph emptyFilePath
   let mods = nub $ map showableModuleName $ IntMap.elems $ depModuleNames mg
   liftIO $ L.logInfo (ideLogger ide) $ T.pack $ "Modules in graph but not indexed: " ++ show (map ShowableModuleName (mods \\ imods))
@@ -215,26 +215,14 @@ refsAtPoint file pos = runMaybeT $ do
     AtPoint.referencesAtPoint hiedb (lookupMod (hsc_dflags sess) opts) hf rf pos'
 
 workspaceSymbols :: T.Text -> IdeAction (Maybe [SymbolInformation])
-workspaceSymbols query = do
-  hiedb <- hiedb <$> askShake
+workspaceSymbols query = runMaybeT $ do
+  hiedb <- lift $ hiedb <$> askShake
+  ide <- ask
+  sess <- hscEnv . fst <$> useE GhcSession (error "fixme")
+  opts <- liftIO $ getIdeOptionsIO ide
   res <- liftIO $ HieDb.searchDef hiedb $ T.unpack query
-  pure $ Just $ map defRowToSymbolInfo res
-
-defRowToSymbolInfo :: HieDb.DefRow -> SymbolInformation
-defRowToSymbolInfo HieDb.DefRow{..}
-  = SymbolInformation (AtPoint.showName defNameOcc) kind Nothing loc Nothing
-  where
-    kind
-      | isVarOcc defNameOcc = SkVariable
-      | isDataOcc defNameOcc = SkConstructor
-      | isTcOcc defNameOcc = SkStruct
-      | otherwise = SkUnknown 1
-    loc = Location file range
-      where
-        file  = fromNormalizedUri $ filePathToUri' $ toNormalizedFilePath' defFile
-        range = Range start end
-        start = Position (defSLine - 1) (defSCol - 1)
-        end   = Position (defELine - 1) (defECol - 1)
+  rs <- lift $ mapMaybeM (AtPoint.defRowToSymbolInfo (lookupMod (hsc_dflags sess) opts)) res
+  pure rs
 
 -- | Parse the contents of a daml file.
 getParsedModule :: NormalizedFilePath -> Action (Maybe ParsedModule)
