@@ -286,12 +286,12 @@ atomicFileWrite targetPath write = do
   (tempFilePath, cleanUp) <- newTempFileWithin dir
   (write tempFilePath >> renameFile tempFilePath targetPath) `onException` cleanUp
 
-addHieFileToDb :: HieWriterChan -> FilePath -> Compat.HieFile -> IO ()
-addHieFileToDb hiechan targetPath hf = do
+addHieFileToDb :: HieWriterChan -> FilePath -> Bool -> Compat.HieFile -> IO ()
+addHieFileToDb hiechan targetPath isBoot hf = do
   time <- getModificationTime targetPath
   writeChan hiechan $ \db -> do
     hPutStrLn stderr $ "Started indexing .hie file: " ++ targetPath
-    addRefsFromLoaded db targetPath time hf
+    addRefsFromLoaded db targetPath isBoot time hf
     hPutStrLn stderr $ "Finished indexing .hie file: " ++ targetPath
 
 generateAndWriteHieFile :: HscEnv -> HieWriterChan -> TypecheckedModule -> IO ([FileDiagnostic],Maybe Compat.HieFile)
@@ -303,7 +303,7 @@ generateAndWriteHieFile hscEnv hiechan tcm =
           GHC.mkHieFile mod_summary (fst $ tm_internals_ tcm) rnsrc ""
         -- Don't save hie files for .boot
         atomicFileWrite targetPath $ flip GHC.writeHieFile hf
-        addHieFileToDb hiechan targetPath hf
+        addHieFileToDb hiechan targetPath isBoot hf
         pure (Just hf)
       _ ->
         return Nothing
@@ -312,9 +312,9 @@ generateAndWriteHieFile hscEnv hiechan tcm =
     mod_summary  = pm_mod_summary $ tm_parsed_module tcm
     mod_location = ms_location mod_summary
     targetPath   = withBootSuffix $ Compat.ml_hie_file mod_location
-    withBootSuffix = case ms_hsc_src mod_summary of
-      HsBootFile -> addBootSuffix
-      _ -> id
+    (withBootSuffix,isBoot) = case ms_hsc_src mod_summary of
+      HsBootFile -> (addBootSuffix,True)
+      _ -> (id,False)
 
 generateAndWriteHiFile :: HscEnv -> TcModuleResult -> IO [FileDiagnostic]
 generateAndWriteHiFile hscEnv tc =
