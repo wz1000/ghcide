@@ -217,12 +217,8 @@ refsAtPoint file pos = runMaybeT $ do
 workspaceSymbols :: T.Text -> IdeAction (Maybe [SymbolInformation])
 workspaceSymbols query = runMaybeT $ do
   hiedb <- lift $ hiedb <$> askShake
-  ide <- ask
-  sess <- hscEnv . fst <$> useE GhcSession (error "fixme")
-  opts <- liftIO $ getIdeOptionsIO ide
   res <- liftIO $ HieDb.searchDef hiedb $ T.unpack query
-  rs <- lift $ mapMaybeM (AtPoint.defRowToSymbolInfo (lookupMod (hsc_dflags sess) opts)) res
-  pure rs
+  pure $ map AtPoint.defRowToSymbolInfo res
 
 -- | Parse the contents of a daml file.
 getParsedModule :: NormalizedFilePath -> Action (Maybe ParsedModule)
