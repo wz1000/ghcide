@@ -206,21 +206,25 @@ nameToLocation hiedb lookupModule name = runMaybeT $
 defRowToLocation :: Monad m => LookupModule m -> Res DefRow -> MaybeT m Location
 defRowToLocation lookupModule (row:.info) = do
   let start = Position (defSLine row - 1) (defSCol row - 1)
-      end = Position (defELine row - 1) (defECol row - 1)
+      end   = Position (defELine row - 1) (defECol row - 1)
       range = Range start end
   file <- lookupModule (modInfoName info) (modInfoUid info) (modInfoIsBoot info)
   pure $ Location file range
 
-defRowToSymbolInfo :: Monad m => LookupModule m -> Res DefRow -> m (Maybe SymbolInformation)
-defRowToSymbolInfo lookupModule row@(DefRow{defNameOcc}:._) = runMaybeT $ do
-    loc <- defRowToLocation lookupModule row
-    pure $ SymbolInformation (showName defNameOcc) kind Nothing loc Nothing
+defRowToSymbolInfo :: Res DefRow -> SymbolInformation
+defRowToSymbolInfo (DefRow{..}:._)
+  = SymbolInformation (showName defNameOcc) kind Nothing loc Nothing
   where
     kind
       | isVarOcc defNameOcc = SkVariable
       | isDataOcc defNameOcc = SkConstructor
       | isTcOcc defNameOcc = SkStruct
       | otherwise = SkUnknown 1
+    loc   = Location file range
+    file  = fromNormalizedUri . filePathToUri' . toNormalizedFilePath' $ defFile
+    range = Range start end
+    start = Position (defSLine - 1) (defSCol - 1)
+    end   = Position (defELine - 1) (defECol - 1)
 
 pointCommand :: HieFile -> Position -> (HieAST TypeIndex -> a) -> [a]
 pointCommand hf pos k =
