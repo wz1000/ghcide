@@ -88,6 +88,8 @@ import Control.Exception.Safe (IOException, catch)
 import FastString (FastString(uniq))
 import qualified HeaderInfo as Hdr
 
+import Control.Monad.State
+
 -- | This is useful for rules to convert rules that can only produce errors or
 -- a result into the more general IdeResult type that supports producing
 -- warnings while also producing a result.
@@ -320,7 +322,7 @@ getLocatedImportsRule =
             Just pkgImports -> pure (concat diags, Just (moduleImports, Set.fromList $ concat pkgImports))
 
 type RawDepM a = StateT (RawDependencyInformation, IntMap ArtifactsLocation) Action a
- 
+
 execRawDepM :: Monad m => StateT (RawDependencyInformation, IntMap a1) m a2 -> m (RawDependencyInformation, IntMap a1)
 execRawDepM act =
     execStateT act
