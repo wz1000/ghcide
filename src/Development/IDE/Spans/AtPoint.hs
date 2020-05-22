@@ -51,7 +51,9 @@ type LookupModule m = ModuleName -> UnitId -> Bool -> MaybeT m Uri
 
 rowToLoc :: Monad m => LookupModule m -> Res RefRow -> m (Maybe Location)
 rowToLoc lookupModule (row:.info) = do
-  mfile <- runMaybeT $ lookupModule (modInfoName info) (modInfoUid info) (modInfoIsBoot info)
+  mfile <- case modInfoSrcFile info of
+    Just f -> pure $ Just $ toUri f
+    Nothing -> runMaybeT $ lookupModule (modInfoName info) (modInfoUnit info) (modInfoIsBoot info)
   pure $ flip Location range <$> mfile
   where
     range = Range start end
@@ -198,7 +200,7 @@ nameToLocation hiedb lookupModule name = runMaybeT $
       -- In this case the interface files contain garbage source spans
       -- so we instead read the .hie files to get useful source spans.
       mod <- MaybeT $ return $ nameModule_maybe name
-      erow <- liftIO $ findOneDef hiedb (nameOccName name) (moduleName mod) (Just $ moduleUnitId mod)
+      erow <- liftIO $ findOneDef hiedb (nameOccName name) (Just $ moduleName mod) (Just $ moduleUnitId mod)
       case erow of
         Left _ -> MaybeT $ pure Nothing
         Right x -> defRowToLocation lookupModule x
@@ -208,8 +210,13 @@ defRowToLocation lookupModule (row:.info) = do
   let start = Position (defSLine row - 1) (defSCol row - 1)
       end   = Position (defELine row - 1) (defECol row - 1)
       range = Range start end
-  file <- lookupModule (modInfoName info) (modInfoUid info) (modInfoIsBoot info)
+  file <- case modInfoSrcFile info of
+    Just src -> pure $ toUri src
+    Nothing -> lookupModule (modInfoName info) (modInfoUnit info) (modInfoIsBoot info)
   pure $ Location file range
+
+toUri :: FilePath -> Uri
+toUri = fromNormalizedUri . filePathToUri' . toNormalizedFilePath'
 
 defRowToSymbolInfo :: Res DefRow -> SymbolInformation
 defRowToSymbolInfo (DefRow{..}:._)
