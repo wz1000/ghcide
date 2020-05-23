@@ -743,8 +743,10 @@ use :: IdeRule k v
 use key file = head <$> uses key [file]
 
 useWithStale :: IdeRule k v
-    => k -> NormalizedFilePath -> Action (Maybe (v, PositionMapping))
-useWithStale key file = head <$> usesWithStale key [file]
+    => k -> NormalizedFilePath -> Action (v, PositionMapping)
+useWithStale key file = do
+  Just v <- head <$> usesWithStale key [file]
+  pure v
 
 newtype IdeAction a = IdeAction { runIdeActionT  :: (ReaderT ShakeExtras IO) a }
     deriving (MonadReader ShakeExtras, MonadIO, Functor, Applicative, Monad)
