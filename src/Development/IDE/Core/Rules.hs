@@ -171,19 +171,17 @@ getDefinition file pos = runMaybeT $ do
     ide <- ask
     opts <- liftIO $ getIdeOptionsIO ide
     (hf,_) <- fst <$> useE GetHieFile file
-    sess <- hscEnv . fst <$> useE GhcSession file
     hiedb <- lift $ hiedb <$> askShake
-    -- liftIO $ L.logInfo (ideLogger ide) $ "Got HieFile ###########"
-    AtPoint.gotoDefinition hiedb (lookupMod (hsc_dflags sess) opts) opts hf pos
+    liftIO $ L.logInfo (logger ide) $ "Got HieFile ###########"
+    AtPoint.gotoDefinition hiedb (\_ _ _ -> MaybeT $ pure Nothing) opts hf pos
 
 getTypeDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe Location)
 getTypeDefinition file pos = runMaybeT $ do
     ide <- ask
     opts <- liftIO $ getIdeOptionsIO ide
     (hf,_) <- fst <$> useE GetHieFile file
-    sess <- hscEnv . fst <$> useE GhcSession file
     hiedb <- lift $ hiedb <$> askShake
-    AtPoint.gotoTypeDefinition hiedb (lookupMod (hsc_dflags sess) opts) opts hf pos
+    AtPoint.gotoTypeDefinition hiedb (\_ _ _ -> MaybeT $ pure Nothing) opts hf pos
 
 highlightAtPoint :: NormalizedFilePath -> Position -> IdeAction (Maybe [DocumentHighlight])
 highlightAtPoint file pos = runMaybeT $ do
@@ -191,28 +189,25 @@ highlightAtPoint file pos = runMaybeT $ do
     !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
     AtPoint.documentHighlight hf rf pos'
 
-{-
 reportDbState :: HieDb.HieDb -> MaybeT IdeAction ()
 reportDbState hiedb = do
   ide <- ask
   imods <- liftIO $ map (HieDb.modInfoName . HieDb.hieModInfo) <$> HieDb.getAllIndexedMods hiedb
   mg <- fst <$> useE GetModuleGraph emptyFilePath
   let mods = nub $ map showableModuleName $ IntMap.elems $ depModuleNames mg
-  liftIO $ L.logInfo (ideLogger ide) $ T.pack $ "Modules in graph but not indexed: " ++ show (map ShowableModuleName (mods \\ imods))
+  liftIO $ L.logInfo (logger ide) $ T.pack $ "Modules in graph but not indexed: " ++ show (map ShowableModuleName (mods \\ imods))
   pure ()
-  -}
 
 refsAtPoint :: NormalizedFilePath -> Position -> IdeAction (Maybe [Location])
 refsAtPoint file pos = runMaybeT $ do
     hiedb <- lift $ hiedb <$> askShake
-    -- _ <- lift $ runMaybeT $ reportDbState hiedb
+    _ <- lift $ runMaybeT $ reportDbState hiedb
 
     opts <- liftIO . getIdeOptionsIO =<< ask
 
     ((hf,PRefMap rf),mapping) <- useE GetHieFile file
-    sess <- hscEnv . fst <$> useE GhcSession file
     !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
-    AtPoint.referencesAtPoint hiedb (lookupMod (hsc_dflags sess) opts) hf rf pos'
+    AtPoint.referencesAtPoint hiedb (\_ _ _ -> MaybeT $ pure Nothing) hf rf pos'
 
 workspaceSymbols :: T.Text -> IdeAction (Maybe [SymbolInformation])
 workspaceSymbols query = runMaybeT $ do
