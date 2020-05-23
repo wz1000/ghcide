@@ -10,4 +10,4 @@ source-repository-package
 source-repository-package
   type: git
   location: https://github.com/wz1000/hiedb
-  tag: a2539692da141e3ecb288660d0f253e6739c1f66
+  tag: 3bf8387dc2076dd8e1de3da259d7a74d56ff2e4b

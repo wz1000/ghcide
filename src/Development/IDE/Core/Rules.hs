@@ -448,6 +448,17 @@ getHieFileRule =
       let refmap = PRefMap . generateReferencesMap . getAsts . hie_asts
       pure $ fmap (\x -> (x,refmap x)) <$> hf
 
+persistentHieFileRule :: Rules ()
+persistentHieFileRule = addPersistentRule GetHieFile $ \file -> runMaybeT $ do
+  nc <- asks ideNc
+  db <- asks hiedb
+  row <- MaybeT $ liftIO $ HieDb.lookupHieFileFromSource db $ fromNormalizedFilePath file
+  let hie_loc = HieDb.hieModuleHieFile row
+  liftIO $ hPutStrLn stderr "LOADING HIE FILE *********************"
+  res <- liftIO $ try @SomeException $ loadHieFile (mkUpdater nc) hie_loc
+  liftIO $ hPutStrLn stderr "LOADED HIE FILE *********************"
+  let refmap = PRefMap . generateReferencesMap . getAsts . hie_asts
+  MaybeT $ pure $ either (const Nothing) (\x -> Just (x,refmap x))  res
 
 getDocMapRule :: Rules ()
 getDocMapRule =
@@ -717,3 +728,4 @@ mainRule = do
     isFileOfInterestRule
     getModSummaryRule
     getModuleGraphRule
+    persistentHieFileRule
