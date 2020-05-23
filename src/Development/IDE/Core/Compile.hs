@@ -288,8 +288,9 @@ atomicFileWrite targetPath write = do
 
 addHieFileToDb :: HieWriterChan -> FilePath -> Bool -> Maybe FilePath -> Compat.HieFile -> IO ()
 addHieFileToDb hiechan targetPath isBoot srcPath hf = do
-  time <- getModificationTime targetPath
   writeChan hiechan $ \db -> do
+    atomicFileWrite targetPath $ flip GHC.writeHieFile hf
+    time <- getModificationTime targetPath
     hPutStrLn stderr $ "Started indexing .hie file: " ++ targetPath ++ " for: " ++ show srcPath
     addRefsFromLoaded db targetPath isBoot srcPath time hf
     hPutStrLn stderr $ "Finished indexing .hie file: " ++ targetPath
@@ -301,7 +302,6 @@ generateAndWriteHieFile hscEnv hiechan tcm =
       Just rnsrc -> do
         hf <- runHsc hscEnv $
           GHC.mkHieFile mod_summary (fst $ tm_internals_ tcm) rnsrc ""
-        atomicFileWrite targetPath $ flip GHC.writeHieFile hf
         addHieFileToDb hiechan targetPath isBoot path hf
         pure (Just hf)
       _ ->
