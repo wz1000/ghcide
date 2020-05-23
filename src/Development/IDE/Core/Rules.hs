@@ -460,7 +460,7 @@ getDocMapRule =
       hsc <- hscEnv <$> use_ GhcSession file
       PRefMap rf <- use_ GetRefMap file
 
-      deps <- maybe (TransitiveDependencies [] [] []) fst <$> useWithStale GetDependencies file
+      (deps,_) <- useWithStale GetDependencies file
       let tdeps = transitiveModuleDeps deps
 
 -- When possible, rely on the haddocks embedded in our interface files

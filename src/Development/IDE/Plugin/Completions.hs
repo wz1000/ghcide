@@ -49,14 +49,11 @@ produceCompletions =
         deps <- maybe (TransitiveDependencies [] [] []) fst <$> useWithStale GetDependencies file
         parsedDeps <- mapMaybe (fmap fst) <$> usesWithStale GetParsedModule (transitiveModuleDeps deps)
 #endif
-        tm <- fmap fst <$> useWithStale TypeCheck file
-        packageState <- fmap (hscEnv . fst) <$> useWithStale GhcSession file
-        case (tm, packageState) of
-            (Just tm', Just packageState') -> do
-                cdata <- liftIO $ cacheDataProducer packageState'
-                                                    (tmrModule tm') parsedDeps
-                return ([], Just cdata)
-            _ -> return ([], Nothing)
+        tm <- fst <$> useWithStale TypeCheck file
+        packageState <- hscEnv . fst <$> useWithStale GhcSession file
+        cdata <- liftIO $ cacheDataProducer packageState
+                                            (tmrModule tm) parsedDeps
+        return ([], Just cdata)
 
 
 -- | Produce completions info for a file
