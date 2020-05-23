@@ -41,11 +41,13 @@ import qualified Data.Text as T
 import qualified Data.Map as M
 import qualified Data.Array as A
 
+import System.IO.Unsafe
+
 
 import IfaceType
 import Data.Either
 
-import HieDb (HieDb, search,RefRow(..), findOneDef, DefRow(..), Res, (:.)(..),ModuleInfo(..))
+import HieDb (HieDb, search,RefRow(..), findOneDef, DefRow(..), Res, (:.)(..),ModuleInfo(..), dynFlagsForPrinting)
 
 type LookupModule m = ModuleName -> UnitId -> Bool -> MaybeT m Uri
 
@@ -251,6 +253,8 @@ showName = showSD . ppr
 showSD :: SDoc -> T.Text
 showSD = T.pack . prettyprint
   where
-    prettyprint x = renderWithStyle unsafeGlobalDynFlags x style
-    style = mkUserStyle unsafeGlobalDynFlags neverQualify AllTheWay
+    prettyprint x = renderWithStyle printDynFlags x style
+    style = mkUserStyle printDynFlags neverQualify AllTheWay
 
+printDynFlags :: DynFlags
+printDynFlags = unsafePerformIO dynFlagsForPrinting
