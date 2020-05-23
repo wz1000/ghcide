@@ -46,7 +46,7 @@ references ide (ReferenceParams (TextDocumentIdentifier uri) pos _ _) = do
 wsSymbols :: IdeState -> WorkspaceSymbolParams -> IO (Either ResponseError (List SymbolInformation))
 wsSymbols ide (WorkspaceSymbolParams query _) = do
   logInfo (ideLogger ide) $ "Workspace symbols request: " <> query
-  runIdeAction "WorkspaceSymbols" ide $ (Right . maybe (List []) List) <$> (workspaceSymbols query)
+  runIdeAction "WorkspaceSymbols" (shakeExtras ide) $ (Right . maybe (List []) List) <$> (workspaceSymbols query)
 
 foundHover :: (Maybe Range, [T.Text]) -> Maybe Hover
 foundHover (mbRange, contents) =
@@ -88,4 +88,4 @@ logAndRunRequest label getResults ide pos path = do
   logInfo (ideLogger ide) $
     label <> " request at position " <> T.pack (showPosition pos) <>
     " in file: " <> T.pack path
-  runIdeAction (T.unpack label) ide (getResults filePath pos)
+  runIdeAction (T.unpack label) (shakeExtras ide) (getResults filePath pos)
