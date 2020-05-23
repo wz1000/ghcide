@@ -136,8 +136,8 @@ getAtPoint file pos = fmap join $ runMaybeT $ do
   ide <- ask
   opts <- liftIO $ getIdeOptionsIO ide
 
-  (hf, mapping) <- useE GetHieFile file
-  (PDocMap dm,_) <- useE GetDocMap file
+  ((hf,_), mapping) <- useE GetHieFile file
+  PDocMap dm <- lift $ maybe (PDocMap mempty) fst <$> (runMaybeT $ useE GetDocMap file)
 
   !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
   return $ AtPoint.atPoint opts hf dm pos'
@@ -170,28 +170,28 @@ getDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe Location)
 getDefinition file pos = runMaybeT $ do
     ide <- ask
     opts <- liftIO $ getIdeOptionsIO ide
-    hf <- fst <$> useE GetHieFile file
+    (hf,_) <- fst <$> useE GetHieFile file
     sess <- hscEnv . fst <$> useE GhcSession file
     hiedb <- lift $ hiedb <$> askShake
-    liftIO $ L.logInfo (ideLogger ide) $ "Got HieFile ###########"
+    -- liftIO $ L.logInfo (ideLogger ide) $ "Got HieFile ###########"
     AtPoint.gotoDefinition hiedb (lookupMod (hsc_dflags sess) opts) opts hf pos
 
 getTypeDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe Location)
 getTypeDefinition file pos = runMaybeT $ do
     ide <- ask
     opts <- liftIO $ getIdeOptionsIO ide
-    hf <- fst <$> useE GetHieFile file
+    (hf,_) <- fst <$> useE GetHieFile file
     sess <- hscEnv . fst <$> useE GhcSession file
     hiedb <- lift $ hiedb <$> askShake
     AtPoint.gotoTypeDefinition hiedb (lookupMod (hsc_dflags sess) opts) opts hf pos
 
 highlightAtPoint :: NormalizedFilePath -> Position -> IdeAction (Maybe [DocumentHighlight])
 highlightAtPoint file pos = runMaybeT $ do
-    hf <- fst <$> useE GetHieFile file
-    (PRefMap rf,mapping) <- useE GetRefMap file
+    ((hf, PRefMap rf),mapping) <- useE GetHieFile file
     !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
     AtPoint.documentHighlight hf rf pos'
 
+{-
 reportDbState :: HieDb.HieDb -> MaybeT IdeAction ()
 reportDbState hiedb = do
   ide <- ask
@@ -200,16 +200,16 @@ reportDbState hiedb = do
   let mods = nub $ map showableModuleName $ IntMap.elems $ depModuleNames mg
   liftIO $ L.logInfo (ideLogger ide) $ T.pack $ "Modules in graph but not indexed: " ++ show (map ShowableModuleName (mods \\ imods))
   pure ()
+  -}
 
 refsAtPoint :: NormalizedFilePath -> Position -> IdeAction (Maybe [Location])
 refsAtPoint file pos = runMaybeT $ do
     hiedb <- lift $ hiedb <$> askShake
-    _ <- lift $ runMaybeT $ reportDbState hiedb
+    -- _ <- lift $ runMaybeT $ reportDbState hiedb
 
     opts <- liftIO . getIdeOptionsIO =<< ask
 
-    hf <- fst <$> useE GetHieFile file
-    (PRefMap rf,mapping) <- useE GetRefMap file
+    ((hf,PRefMap rf),mapping) <- useE GetHieFile file
     sess <- hscEnv . fst <$> useE GhcSession file
     !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
     AtPoint.referencesAtPoint hiedb (lookupMod (hsc_dflags sess) opts) hf rf pos'
@@ -439,29 +439,24 @@ getHieFileRule :: Rules ()
 getHieFileRule =
     define $ \GetHieFile f -> do
       tcm <- use_ TypeCheck f
-      case tmrHieFile tcm of
+      hf <- case tmrHieFile tcm of
         Just hf -> pure ([],Just hf)
         Nothing -> do
           hsc  <- hscEnv <$> use_ GhcSession f
           ShakeExtras{hiedbChan} <- getShakeExtras
           liftIO $ generateAndWriteHieFile hsc hiedbChan (tmrModule tcm)
+      let refmap = PRefMap . generateReferencesMap . getAsts . hie_asts
+      pure $ fmap (\x -> (x,refmap x)) <$> hf
 
-getRefMapRule :: Rules ()
-getRefMapRule =
-    define $ \GetRefMap file -> do
-      hf <- use_ GetHieFile file
-      let asts = hie_asts hf
-          refmap = generateReferencesMap $ getAsts asts
-      return ([],Just $ PRefMap refmap)
 
 getDocMapRule :: Rules ()
 getDocMapRule =
     define $ \GetDocMap file -> do
       hmi <- tmrModInfo <$> use_ TypeCheck file
       hsc <- hscEnv <$> use_ GhcSession file
-      PRefMap rf <- use_ GetRefMap file
+      (_,(PRefMap rf)) <- use_ GetHieFile file
 
-      deps <- maybe (TransitiveDependencies [] [] []) fst <$> useWithStale GetDependencies file
+      deps <- fst <$> useWithStale GetDependencies file
       let tdeps = transitiveModuleDeps deps
 
 -- When possible, rely on the haddocks embedded in our interface files
@@ -713,7 +708,6 @@ mainRule = do
     getDependenciesRule
     typeCheckRule
     getHieFileRule
-    getRefMapRule
     getDocMapRule
     generateCoreRule
     generateByteCodeRule

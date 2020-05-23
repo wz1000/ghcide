@@ -83,7 +83,7 @@ instance Show HiFileResult where
 type instance RuleResult TypeCheck = TcModuleResult
 
 -- | Information about what spans occur where, requires TypeCheck
-type instance RuleResult GetHieFile = HieFile
+type instance RuleResult GetHieFile = (HieFile, PRefMap)
 
 newtype PRefMap = PRefMap {getRefMap :: RefMap}
 instance NFData PRefMap where
@@ -91,8 +91,6 @@ instance NFData PRefMap where
 
 instance Show PRefMap where
     show = const "refmap"
-
-type instance RuleResult GetRefMap = PRefMap
 
 newtype PDocMap = PDocMap {getDocMap :: DocMap}
 instance NFData PDocMap where
@@ -179,12 +177,6 @@ data GetHieFile = GetHieFile
 instance Hashable GetHieFile
 instance NFData   GetHieFile
 instance Binary   GetHieFile
-
-data GetRefMap = GetRefMap
-    deriving (Eq, Show, Typeable, Generic)
-instance Hashable GetRefMap
-instance NFData   GetRefMap
-instance Binary   GetRefMap
 
 data GetDocMap = GetDocMap
     deriving (Eq, Show, Typeable, Generic)
