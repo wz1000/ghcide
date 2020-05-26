@@ -47,7 +47,7 @@ import System.IO.Unsafe
 import IfaceType
 import Data.Either
 
-import HieDb (HieDb, search,RefRow(..), findOneDef, DefRow(..), Res, (:.)(..),ModuleInfo(..), dynFlagsForPrinting)
+import HieDb (HieDb, search,RefRow(..), findDef, DefRow(..), Res, (:.)(..),ModuleInfo(..), dynFlagsForPrinting)
 
 type LookupModule m = ModuleName -> UnitId -> Bool -> MaybeT m Uri
 
@@ -108,9 +108,9 @@ gotoTypeDefinition
   -> IdeOptions
   -> HieFile
   -> Position
-  -> MaybeT m Location
+  -> MaybeT m [Location]
 gotoTypeDefinition hiedb lookupModule ideOpts srcSpans pos
-  = MaybeT (listToMaybe <$> typeLocationsAtPoint hiedb lookupModule ideOpts pos srcSpans)
+  = lift $ typeLocationsAtPoint hiedb lookupModule ideOpts pos srcSpans
 
 -- | Locate the definition of the name at a given position.
 gotoDefinition
@@ -120,9 +120,9 @@ gotoDefinition
   -> IdeOptions
   -> HieFile
   -> Position
-  -> MaybeT m Location
+  -> MaybeT m [Location]
 gotoDefinition hiedb lookupModule ideOpts srcSpans pos =
-  MaybeT (listToMaybe <$> locationsAtPoint hiedb lookupModule ideOpts pos srcSpans)
+  lift $ locationsAtPoint hiedb lookupModule ideOpts pos srcSpans
 
 -- | Synopsis for the name at a given position.
 atPoint
@@ -176,7 +176,7 @@ typeLocationsAtPoint hiedb lookupModule _ideOptions pos ast =
         HTyConApp tc _ -> Just $ ifaceTyConName tc
         HTyVarTy n -> Just n
         _ -> Nothing
-    in mapMaybeM (nameToLocation hiedb lookupModule) ns
+    in concatMapM (fmap (maybe [] id) . nameToLocation hiedb lookupModule) ns
 
 locationsAtPoint
   :: forall m
@@ -189,23 +189,23 @@ locationsAtPoint
   -> m [Location]
 locationsAtPoint hiedb lookupModule _ideOptions pos ast =
   let ns = concat $ pointCommand ast pos (rights . M.keys . nodeIdentifiers . nodeInfo)
-    in mapMaybeM (nameToLocation hiedb lookupModule) ns
+    in concatMapM (fmap (maybe [] id) . nameToLocation hiedb lookupModule) ns
 
 -- | Given a 'Name' attempt to find the location where it is defined.
-nameToLocation :: MonadIO m => HieDb -> LookupModule m -> Name -> m (Maybe Location)
+nameToLocation :: MonadIO m => HieDb -> LookupModule m -> Name -> m (Maybe [Location])
 nameToLocation hiedb lookupModule name = runMaybeT $
   case nameSrcSpan name of
-    sp@(RealSrcSpan _) -> MaybeT $ pure $ srcSpanToLocationMaybe sp
+    sp@(RealSrcSpan _) -> MaybeT $ pure $ fmap pure $ srcSpanToLocationMaybe sp
     sp@(UnhelpfulSpan _) -> do
       guard (sp /= wiredInSrcSpan)
       -- This case usually arises when the definition is in an external package.
       -- In this case the interface files contain garbage source spans
       -- so we instead read the .hie files to get useful source spans.
       mod <- MaybeT $ return $ nameModule_maybe name
-      erow <- liftIO $ findOneDef hiedb (nameOccName name) (Just $ moduleName mod) (Just $ moduleUnitId mod)
+      erow <- liftIO $ findDef hiedb (nameOccName name) (Just $ moduleName mod) (Just $ moduleUnitId mod)
       case erow of
-        Left _ -> MaybeT $ pure Nothing
-        Right x -> defRowToLocation lookupModule x
+        [] -> MaybeT $ pure Nothing
+        xs -> lift $ mapMaybeM (runMaybeT . defRowToLocation lookupModule) xs
 
 defRowToLocation :: Monad m => LookupModule m -> Res DefRow -> MaybeT m Location
 defRowToLocation lookupModule (row:.info) = do

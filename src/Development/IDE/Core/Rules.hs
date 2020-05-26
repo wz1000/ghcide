@@ -166,7 +166,7 @@ lookupMod dflags opts mn uid isBoot
           maybe (Dir.doesFileExist $ fromNormalizedFilePath f) pure r
 
 -- | Goto Definition.
-getDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe Location)
+getDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe [Location])
 getDefinition file pos = runMaybeT $ do
     ide <- ask
     opts <- liftIO $ getIdeOptionsIO ide
@@ -175,7 +175,7 @@ getDefinition file pos = runMaybeT $ do
     liftIO $ L.logInfo (logger ide) $ "Got HieFile ###########"
     AtPoint.gotoDefinition hiedb (\_ _ _ -> MaybeT $ pure Nothing) opts hf pos
 
-getTypeDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe Location)
+getTypeDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe [Location])
 getTypeDefinition file pos = runMaybeT $ do
     ide <- ask
     opts <- liftIO $ getIdeOptionsIO ide

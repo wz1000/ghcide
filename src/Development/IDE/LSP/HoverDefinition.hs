@@ -31,8 +31,8 @@ gotoDefinition :: IdeState -> TextDocumentPositionParams -> IO (Either ResponseE
 hover          :: IdeState -> TextDocumentPositionParams -> IO (Either ResponseError (Maybe Hover))
 gotoTypeDefinition :: IdeState -> TextDocumentPositionParams -> IO (Either ResponseError LocationResponseParams)
 documentHighlight :: IdeState -> TextDocumentPositionParams -> IO (Either ResponseError (List DocumentHighlight))
-gotoDefinition = request "Definition" getDefinition (MultiLoc []) SingleLoc
-gotoTypeDefinition = request "TypeDefinition" getTypeDefinition (MultiLoc []) SingleLoc
+gotoDefinition = request "Definition" getDefinition (MultiLoc []) MultiLoc
+gotoTypeDefinition = request "TypeDefinition" getTypeDefinition (MultiLoc []) MultiLoc
 hover          = request "Hover"      getAtPoint     Nothing      foundHover
 documentHighlight = request "DocumentHighlight" highlightAtPoint (List []) List
 
