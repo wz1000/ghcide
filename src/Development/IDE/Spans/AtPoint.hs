@@ -88,7 +88,7 @@ documentHighlight
   -> RefMap
   -> Position
   -> MaybeT m [DocumentHighlight]
-documentHighlight hf rf pos = pure highlights
+documentHighlight hf rf pos = MaybeT $ pure (Just highlights)
   where
     ns = concat $ pointCommand hf pos (rights . M.keys . nodeIdentifiers . nodeInfo)
     highlights = do

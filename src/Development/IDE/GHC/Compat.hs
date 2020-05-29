@@ -39,6 +39,7 @@ module Development.IDE.GHC.Compat(
     GHC.ModLocation,
     Module.addBootSuffix,
     pattern ModLocation,
+    getConArgs,
 
     upNameCache,
 
@@ -63,7 +64,12 @@ import HscTypes
 import NameCache
 
 import qualified GHC
-import GHC hiding (ClassOpSig, DerivD, ForD, IEThingAll, IEThingWith, InstD, TyClD, ValD, ModLocation)
+import GHC hiding (
+      ClassOpSig, DerivD, ForD, IEThingAll, IEThingWith, InstD, TyClD, ValD, ModLocation
+#if MIN_GHC_API_VERSION(8,6,0)
+    , getConArgs
+#endif
+    )
 import qualified HeaderInfo as Hdr
 import Avail
 import ErrUtils (ErrorMessages)
@@ -259,6 +265,13 @@ getModuleHash = mi_mod_hash . mi_final_exts
 getModuleHash = mi_mod_hash
 #endif
 
+getConArgs :: ConDecl pass -> HsConDeclDetails pass
+#if MIN_GHC_API_VERSION(8,6,0)
+getConArgs = GHC.getConArgs
+#else
+getConArgs = GHC.getConDetails
+#endif
+
 type RefMap = Map Identifier [(Span, IdentifierDetails TypeIndex)]
 
 supportsHieFiles :: Bool
@@ -269,4 +282,3 @@ hieExportNames = nameListFromAvails . hie_exports
 
 getPackageName :: DynFlags -> Module.InstalledUnitId -> Maybe PackageName
 getPackageName dfs i = packageName <$> lookupPackage dfs (Module.DefiniteUnitId (Module.DefUnitId i))
-

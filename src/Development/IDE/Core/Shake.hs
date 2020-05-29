@@ -199,7 +199,7 @@ instance Eq Key where
                      | otherwise = False
 
 instance Hashable Key where
-    hashWithSalt salt (Key key) = hashWithSalt salt key
+    hashWithSalt salt (Key key) = hashWithSalt salt (typeOf key, key)
 
 -- | The result of an IDE operation. Warnings and errors are in the Diagnostic,
 --   and a value is in the Maybe. For operations that throw an error you
@@ -774,8 +774,10 @@ use key file = head <$> uses key [file]
 useWithStale :: IdeRule k v
     => k -> NormalizedFilePath -> Action (v, PositionMapping)
 useWithStale key file = do
-  Just v <- head <$> usesWithStale key [file]
-  pure v
+  res <- head <$> usesWithStale key [file]
+  case res of
+    Nothing -> liftIO $ throwIO $ BadDependency (show key)
+    Just v -> return v
 
 newtype IdeAction a = IdeAction { runIdeActionT  :: (ReaderT ShakeExtras IO) a }
     deriving (MonadReader ShakeExtras, MonadIO, Functor, Applicative, Monad)
@@ -863,12 +865,10 @@ instance Show k => Show (Q k) where
 
 -- | Invariant: the 'v' must be in normal form (fully evaluated).
 --   Otherwise we keep repeatedly 'rnf'ing values taken from the Shake database
--- Note (MK) I am not sure why we need the ShakeValue here, maybe we
--- can just remove it?
-data A v = A (Value v) ShakeValue
+newtype A v = A (Value v)
     deriving Show
 
-instance NFData (A v) where rnf (A v x) = v `seq` rnf x
+instance NFData (A v) where rnf (A v) = v `seq` ()
 
 -- In the Shake database we only store one type of key/result pairs,
 -- namely Q (question) / A (answer).
@@ -878,19 +878,22 @@ type instance RuleResult (Q k) = A (RuleResult k)
 -- | Return up2date results. Stale results will be ignored.
 uses :: IdeRule k v
     => k -> [NormalizedFilePath] -> Action [Maybe v]
-uses key files = map (\(A value _) -> currentValue value) <$> apply (map (Q . (key,)) files)
+uses key files = map (\(A value) -> currentValue value) <$> apply (map (Q . (key,)) files)
 
 -- | Return the last computed result which might be stale.
 usesWithStale :: IdeRule k v
     => k -> [NormalizedFilePath] -> Action [Maybe (v, PositionMapping)]
 usesWithStale key files = do
-    values <- map (\(A value _) -> value) <$> apply (map (Q . (key,)) files)
+    values <- map (\(A value) -> value) <$> apply (map (Q . (key,)) files)
     zipWithM (lastValue key) files values
 
 
 withProgress :: (Eq a, Hashable a) => Var (HMap.HashMap a Int) -> a -> Action b -> Action b
 withProgress var file = actionBracket (f succ) (const $ f pred) . const
-    where f shift = modifyVar_ var $ \x -> return (HMap.alter (\x -> Just (shift (fromMaybe 0 x))) file x)
+    -- This functions are deliberately eta-expanded to avoid space leaks.
+    -- Do not remove the eta-expansion without profiling a session with at
+    -- least 1000 modifications.
+    where f shift = modifyVar_ var $ \x -> evaluate $ HMap.alter (\x -> Just $! shift (fromMaybe 0 x)) file x
 
 
 defineEarlyCutoff
@@ -907,7 +910,7 @@ defineEarlyCutoff op = addBuiltinRule noLint noIdentity $ \(Q (key, file)) (old 
                 case v of
                     -- No changes in the dependencies and we have
                     -- an existing result.
-                    Just v -> return $ Just $ RunResult ChangedNothing old $ A v (decodeShakeValue old)
+                    Just v -> return $ Just $ RunResult ChangedNothing old $ A v
                     _ -> return Nothing
             _ -> return Nothing
         case val of
@@ -938,7 +941,7 @@ defineEarlyCutoff op = addBuiltinRule noLint noIdentity $ \(Q (key, file)) (old 
                 return $ RunResult
                     (if eq then ChangedRecomputeSame else ChangedRecomputeDiff)
                     (encodeShakeValue bs) $
-                    A res bs
+                    A res
 
 
 -- | Rule type, input file
@@ -1092,7 +1095,7 @@ publishDiagnosticsNotification uri diags =
 newtype Priority = Priority Double
 
 setPriority :: Priority -> Action ()
-setPriority (Priority p) = deprioritize p
+setPriority (Priority p) = reschedule p
 
 sendEvent :: LSP.FromServerMessage -> Action ()
 sendEvent e = do
@@ -1118,7 +1121,7 @@ instance Binary   GetModificationTime
 type instance RuleResult GetModificationTime = FileVersion
 
 data FileVersion
-    = VFSVersion Int
+    = VFSVersion !Int
     | ModificationTime
       !Int   -- ^ Large unit (platform dependent, do not make assumptions)
       !Int   -- ^ Small unit (platform dependent, do not make assumptions)

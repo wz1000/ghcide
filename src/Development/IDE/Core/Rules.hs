@@ -33,8 +33,9 @@ module Development.IDE.Core.Rules(
 import Fingerprint
 
 import Data.Binary
-import Util
+import Data.Binary hiding (get, put)
 import Data.Bifunctor (second)
+import Util
 import Control.Monad.Extra
 import Control.Applicative
 import Control.Monad.Trans.Class
@@ -78,7 +79,7 @@ import GHC.Generics(Generic)
 import qualified Development.IDE.Spans.AtPoint as AtPoint
 import Development.IDE.Core.Service
 import Development.IDE.Core.Shake
-import Development.Shake.Classes
+import Development.Shake.Classes hiding (get, put)
 import Control.Monad.Trans.Except (runExceptT)
 import Data.ByteString (ByteString)
 import Control.Concurrent.Async (concurrently)
@@ -98,6 +99,7 @@ import Packages
 
 import System.IO
 
+import Control.Monad.State
 
 -- | This is useful for rules to convert rules that can only produce errors or
 -- a result into the more general IdeResult type that supports producing
@@ -244,7 +246,7 @@ getParsedModuleRule = defineEarlyCutoff $ \GetParsedModule file -> do
     let hsc = hscEnv sess
         -- After parsing the module remove all package imports referring to
         -- these packages as we have already dealt with what they map to.
-        comp_pkgs = map (fst . mkImportDirs) (deps sess)
+        comp_pkgs = mapMaybe (fmap fst . mkImportDirs) (deps sess)
     opt <- getIdeOptions
     (_, contents) <- getFileContents file
 
@@ -314,6 +316,14 @@ getLocatedImportsRule =
             Nothing -> pure (concat diags, Nothing)
             Just pkgImports -> pure (concat diags, Just (moduleImports, Set.fromList $ concat pkgImports))
 
+type RawDepM a = StateT (RawDependencyInformation, IntMap ArtifactsLocation) Action a
+
+execRawDepM :: Monad m => StateT (RawDependencyInformation, IntMap a1) m a2 -> m (RawDependencyInformation, IntMap a1)
+execRawDepM act =
+    execStateT act
+        ( RawDependencyInformation IntMap.empty emptyPathIdMap IntMap.empty
+        , IntMap.empty
+        )
 
 -- | Given a target file path, construct the raw dependency results by following
 -- imports recursively.
@@ -525,7 +535,7 @@ typeCheckRuleDefinition file pm generateArtifacts = do
   IdeOptions { optDefer = defer } <- getIdeOptions
 
   ShakeExtras{hiedbChan} <- getShakeExtras
-  liftIO $ do
+  addUsageDependencies $ liftIO $ do
     res <- typecheckModule defer hsc (zipWith unpack mirs bytecodes) pm
     case res of
       (diags, Just (hsc,tcm)) | DoGenerateInterfaceFiles <- generateArtifacts -> do
@@ -537,6 +547,18 @@ typeCheckRuleDefinition file pm generateArtifacts = do
   unpack HiFileResult{..} bc = (hirModSummary, (hirModIface, bc))
   uses_th_qq dflags =
     xopt LangExt.TemplateHaskell dflags || xopt LangExt.QuasiQuotes dflags
+
+  addUsageDependencies :: Action (a, Maybe TcModuleResult) -> Action (a, Maybe TcModuleResult)
+  addUsageDependencies a = do
+    r@(_, mtc) <- a
+    forM_ mtc $ \tc -> do
+      let used_files = mapMaybe udep (mi_usages (hm_iface (tmrModInfo tc)))
+          udep (UsageFile fp _h) = Just fp
+          udep _ = Nothing
+      -- Add a dependency on these files which are added by things like
+      -- qAddDependentFile
+      void $ uses_ GetModificationTime (map toNormalizedFilePath' used_files)
+    return r
 
 
 generateCore :: RunSimplifier -> NormalizedFilePath -> Action (IdeResult (SafeHaskellMode, CgGuts, ModDetails))
@@ -605,28 +627,12 @@ getHiFileRule = defineEarlyCutoff $ \GetHiFile f -> do
                 HsBootFile -> addBootSuffix (ml_hi_file $ ms_location ms)
                 _ -> ml_hi_file $ ms_location ms
 
-  IdeOptions{optInterfaceLoadingDiagnostics} <- getIdeOptions
-
-  let mkInterfaceFilesGenerationDiag f intro
-        | optInterfaceLoadingDiagnostics = mkDiag $ intro <> msg
-        | otherwise = []
-            where
-                msg =
-                    ": additional resource use while generating interface files in the background."
-                mkDiag = pure
-                       . ideErrorWithSource (Just "interface file loading") (Just DsInfo) f
-                       . T.pack
-
   case sequence depHis of
-    Nothing -> do
-          let d = mkInterfaceFilesGenerationDiag f "Missing interface file dependencies"
-          pure (Nothing, (d, Nothing))
+    Nothing -> pure (Nothing, ([], Nothing))
     Just deps -> do
       gotHiFile <- getFileExists hiFile
       if not gotHiFile
-        then do
-          let d = mkInterfaceFilesGenerationDiag f "Missing interface file"
-          pure (Nothing, (d, Nothing))
+        then pure (Nothing, ([], Nothing))
         else do
           hiVersion  <- use_ GetModificationTime hiFile
           modVersion <- use_ GetModificationTime f
@@ -635,8 +641,7 @@ getHiFileRule = defineEarlyCutoff $ \GetHiFile f -> do
           let sourceModified = newerFileVersion modVersion hiVersion
           if sourceModified
             then do
-              let d = mkInterfaceFilesGenerationDiag f "Stale interface file"
-              pure (Nothing, (d, Nothing))
+              pure (Nothing, ([], Nothing))
             else do
               session <- hscEnv <$> use_ GhcSession f
               r <- liftIO $ loadInterface session ms deps
@@ -679,7 +684,7 @@ getModIfaceRule = define $ \GetModIface f -> do
             let hsc = hscEnv sess
                 -- After parsing the module remove all package imports referring to
                 -- these packages as we have already dealt with what they map to.
-                comp_pkgs = map (fst . mkImportDirs) (deps sess)
+                comp_pkgs = mapMaybe (fmap fst . mkImportDirs) (deps sess)
             opt <- getIdeOptions
             (_, contents) <- getFileContents f
             -- Embed --haddocks in the interface file

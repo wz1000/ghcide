@@ -180,7 +180,6 @@ instance Binary   GetHieFile
 
 data GetDocMap = GetDocMap
     deriving (Eq, Show, Typeable, Generic)
-
 instance Hashable GetDocMap
 instance NFData   GetDocMap
 instance Binary   GetDocMap

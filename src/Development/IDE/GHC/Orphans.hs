@@ -1,9 +1,11 @@
 -- Copyright (c) 2019 The DAML Authors. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+{-# LANGUAGE CPP               #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE CPP #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
+#include "ghc-api-version.h"
 
 -- | Orphan instances for GHC.
 --   Note that the 'NFData' instances may not be law abiding.

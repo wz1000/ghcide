@@ -11,6 +11,7 @@ module Main (main) where
 
 import Control.Applicative.Combinators
 import Control.Exception (catch)
+import qualified Control.Lens as Lens
 import Control.Monad
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, Value)
@@ -27,11 +28,11 @@ import Development.IDE.Test
 import Development.IDE.Test.Runfiles
 import Development.IDE.Types.Location
 import Development.Shake (getDirectoryFilesIO)
-import qualified Language.Haskell.LSP.Test as LSPTest
-import Language.Haskell.LSP.Test hiding (openDoc')
+import Language.Haskell.LSP.Test
 import Language.Haskell.LSP.Messages
 import Language.Haskell.LSP.Types
 import Language.Haskell.LSP.Types.Capabilities
+import qualified Language.Haskell.LSP.Types.Lens as Lsp (diagnostics, params, message)
 import Language.Haskell.LSP.VFS (applyChange)
 import Network.URI
 import System.Environment.Blank (setEnv)
@@ -50,7 +51,7 @@ import Data.Maybe
 main :: IO ()
 main = defaultMainWithRerun $ testGroup "HIE"
   [ testSession "open close" $ do
-      doc <- openDoc' "Testing.hs" "haskell" ""
+      doc <- createDoc "Testing.hs" "haskell" ""
       void (skipManyTill anyMessage message :: Session WorkDoneProgressCreateRequest)
       void (skipManyTill anyMessage message :: Session WorkDoneProgressBeginNotification)
       closeDoc doc
@@ -72,6 +73,7 @@ main = defaultMainWithRerun $ testGroup "HIE"
   , positionMappingTests
   , watchedFilesTests
   , cradleTests
+  , dependentFileTest
   ]
 
 initializeResponseTests :: TestTree
@@ -147,7 +149,7 @@ diagnosticTests :: TestTree
 diagnosticTests = testGroup "diagnostics"
   [ testSessionWait "fix syntax error" $ do
       let content = T.unlines [ "module Testing wher" ]
-      doc <- openDoc' "Testing.hs" "haskell" content
+      doc <- createDoc "Testing.hs" "haskell" content
       expectDiagnostics [("Testing.hs", [(DsError, (0, 15), "parse error")])]
       let change = TextDocumentContentChangeEvent
             { _range = Just (Range (Position 0 15) (Position 0 19))
@@ -158,7 +160,7 @@ diagnosticTests = testGroup "diagnostics"
       expectDiagnostics [("Testing.hs", [])]
   , testSessionWait "introduce syntax error" $ do
       let content = T.unlines [ "module Testing where" ]
-      doc <- openDoc' "Testing.hs" "haskell" content
+      doc <- createDoc "Testing.hs" "haskell" content
       void $ skipManyTill anyMessage (message :: Session WorkDoneProgressCreateRequest)
       void $ skipManyTill anyMessage (message :: Session WorkDoneProgressBeginNotification)
       let change = TextDocumentContentChangeEvent
@@ -176,7 +178,7 @@ diagnosticTests = testGroup "diagnostics"
             , "bar :: Int -> Int -> Int"
             , "bar a b = cd + b"
             ]
-      _ <- openDoc' "Testing.hs" "haskell" content
+      _ <- createDoc "Testing.hs" "haskell" content
       expectDiagnostics
         [ ( "Testing.hs"
           , [ (DsError, (2, 14), "Variable not in scope: ab")
@@ -190,7 +192,7 @@ diagnosticTests = testGroup "diagnostics"
             , "foo :: Int -> String -> Int"
             , "foo a b = a + b"
             ]
-      _ <- openDoc' "Testing.hs" "haskell" content
+      _ <- createDoc "Testing.hs" "haskell" content
       expectDiagnostics
         [ ( "Testing.hs"
           , [(DsError, (2, 14), "Couldn't match type '[Char]' with 'Int'")]
@@ -202,7 +204,7 @@ diagnosticTests = testGroup "diagnostics"
             , "foo :: Int -> String"
             , "foo a = _ a"
             ]
-      _ <- openDoc' "Testing.hs" "haskell" content
+      _ <- createDoc "Testing.hs" "haskell" content
       expectDiagnostics
         [ ( "Testing.hs"
           , [(DsError, (2, 8), "Found hole: _ :: Int -> String")]
@@ -224,24 +226,23 @@ diagnosticTests = testGroup "diagnostics"
           [ ("A.hs", [(DsError, (2,4), aMessage)])
           , ("B.hs", [(DsError, (3,4), bMessage)])]
         deferralTest title binding msg = testSessionWait title $ do
-          _ <- openDoc' "A.hs" "haskell" $ sourceA binding
-          _ <- openDoc' "B.hs" "haskell"   sourceB
+          _ <- createDoc "A.hs" "haskell" $ sourceA binding
+          _ <- createDoc "B.hs" "haskell"   sourceB
           expectDiagnostics $ expectedDs msg
     in
     [ deferralTest "type error"          "True"    "Couldn't match expected type"
     , deferralTest "typed hole"          "_"       "Found hole"
     , deferralTest "out of scope var"    "unbound" "Variable not in scope"
-    , deferralTest "message shows error" "True"    "A.hs:3:5: error:"
     ]
 
   , testSessionWait "remove required module" $ do
       let contentA = T.unlines [ "module ModuleA where" ]
-      docA <- openDoc' "ModuleA.hs" "haskell" contentA
+      docA <- createDoc "ModuleA.hs" "haskell" contentA
       let contentB = T.unlines
             [ "module ModuleB where"
             , "import ModuleA"
             ]
-      _ <- openDoc' "ModuleB.hs" "haskell" contentB
+      _ <- createDoc "ModuleB.hs" "haskell" contentB
       let change = TextDocumentContentChangeEvent
             { _range = Just (Range (Position 0 0) (Position 0 20))
             , _rangeLength = Nothing
@@ -254,20 +255,20 @@ diagnosticTests = testGroup "diagnostics"
             [ "module ModuleB where"
             , "import ModuleA"
             ]
-      _ <- openDoc' "ModuleB.hs" "haskell" contentB
+      _ <- createDoc "ModuleB.hs" "haskell" contentB
       expectDiagnostics [("ModuleB.hs", [(DsError, (1, 7), "Could not find module")])]
       let contentA = T.unlines [ "module ModuleA where" ]
-      _ <- openDoc' "ModuleA.hs" "haskell" contentA
+      _ <- createDoc "ModuleA.hs" "haskell" contentA
       expectDiagnostics [("ModuleB.hs", [])]
   , testSessionWait "add missing module (non workspace)" $ do
       let contentB = T.unlines
             [ "module ModuleB where"
             , "import ModuleA"
             ]
-      _ <- openDoc'' "/tmp/ModuleB.hs" "haskell" contentB
+      _ <- createDoc "/tmp/ModuleB.hs" "haskell" contentB
       expectDiagnostics [("/tmp/ModuleB.hs", [(DsError, (1, 7), "Could not find module")])]
       let contentA = T.unlines [ "module ModuleA where" ]
-      _ <- openDoc'' "/tmp/ModuleA.hs" "haskell" contentA
+      _ <- createDoc "/tmp/ModuleA.hs" "haskell" contentA
       expectDiagnostics [("/tmp/ModuleB.hs", [])]
   , testSessionWait "cyclic module dependency" $ do
       let contentA = T.unlines
@@ -278,8 +279,8 @@ diagnosticTests = testGroup "diagnostics"
             [ "module ModuleB where"
             , "import ModuleA"
             ]
-      _ <- openDoc' "ModuleA.hs" "haskell" contentA
-      _ <- openDoc' "ModuleB.hs" "haskell" contentB
+      _ <- createDoc "ModuleA.hs" "haskell" contentA
+      _ <- createDoc "ModuleB.hs" "haskell" contentB
       expectDiagnostics
         [ ( "ModuleA.hs"
           , [(DsError, (1, 7), "Cyclic module dependency between ModuleA, ModuleB")]
@@ -300,9 +301,9 @@ diagnosticTests = testGroup "diagnostics"
       let contentBboot = T.unlines
             [ "module ModuleB where"
             ]
-      _ <- openDoc' "ModuleA.hs" "haskell" contentA
-      _ <- openDoc' "ModuleB.hs" "haskell" contentB
-      _ <- openDoc' "ModuleB.hs-boot" "haskell" contentBboot
+      _ <- createDoc "ModuleA.hs" "haskell" contentA
+      _ <- createDoc "ModuleB.hs" "haskell" contentB
+      _ <- createDoc "ModuleB.hs-boot" "haskell" contentBboot
       expectDiagnostics []
   , testSessionWait "correct reference used with hs-boot" $ do
       let contentB = T.unlines
@@ -324,10 +325,10 @@ diagnosticTests = testGroup "diagnostics"
             -- resolved to the hs-boot file
             , "y = x"
             ]
-      _ <- openDoc' "ModuleB.hs" "haskell" contentB
-      _ <- openDoc' "ModuleA.hs" "haskell" contentA
-      _ <- openDoc' "ModuleA.hs-boot" "haskell" contentAboot
-      _ <- openDoc' "ModuleC.hs" "haskell" contentC
+      _ <- createDoc "ModuleB.hs" "haskell" contentB
+      _ <- createDoc "ModuleA.hs" "haskell" contentA
+      _ <- createDoc "ModuleA.hs-boot" "haskell" contentAboot
+      _ <- createDoc "ModuleC.hs" "haskell" contentC
       expectDiagnostics []
   , testSessionWait "redundant import" $ do
       let contentA = T.unlines ["module ModuleA where"]
@@ -336,8 +337,8 @@ diagnosticTests = testGroup "diagnostics"
             , "module ModuleB where"
             , "import ModuleA"
             ]
-      _ <- openDoc' "ModuleA.hs" "haskell" contentA
-      _ <- openDoc' "ModuleB.hs" "haskell" contentB
+      _ <- createDoc "ModuleA.hs" "haskell" contentA
+      _ <- createDoc "ModuleB.hs" "haskell" contentB
       expectDiagnostics
         [ ( "ModuleB.hs"
           , [(DsWarning, (2, 0), "The import of 'ModuleA' is redundant")]
@@ -359,8 +360,8 @@ diagnosticTests = testGroup "diagnostics"
             , "wrong1 = ThisList.map"
             , "wrong2 = BaseList.x"
             ]
-      _ <- openDoc' "Data/List.hs" "haskell" thisDataListContent
-      _ <- openDoc' "Main.hs" "haskell" mainContent
+      _ <- createDoc "Data/List.hs" "haskell" thisDataListContent
+      _ <- createDoc "Main.hs" "haskell" mainContent
       expectDiagnostics
         [ ( "Main.hs"
           , [(DsError, (6, 9), "Not in scope: \8216ThisList.map\8217")
@@ -375,7 +376,7 @@ diagnosticTests = testGroup "diagnostics"
             , "foo :: Ord a => a -> Int"
             , "foo a = 1"
             ]
-      _ <- openDoc' "Foo.hs" "haskell" fooContent
+      _ <- createDoc "Foo.hs" "haskell" fooContent
       expectDiagnostics
         [ ( "Foo.hs"
       -- The test is to make sure that warnings contain unqualified names
@@ -426,13 +427,32 @@ diagnosticTests = testGroup "diagnostics"
             , "foo :: Int"
             , "foo = 1 {-|-}"
             ]
-      _ <- openDoc' "Foo.hs" "haskell" fooContent
+      _ <- createDoc "Foo.hs" "haskell" fooContent
       expectDiagnostics
         [ ( "Foo.hs"
           , [(DsError, (2, 8), "Parse error on input")
             ]
           )
         ]
+  , testSessionWait "strip file path" $ do
+      let
+          name = "Testing"
+          content = T.unlines
+            [ "module " <> name <> " where"
+            , "value :: Maybe ()"
+            , "value = [()]"
+            ]
+      _ <- createDoc (T.unpack name <> ".hs") "haskell" content
+      notification <- skipManyTill anyMessage diagnostic
+      let
+          offenders =
+            Lsp.params .
+            Lsp.diagnostics .
+            Lens.folded .
+            Lsp.message .
+            Lens.filtered (T.isInfixOf ("/" <> name <> ".hs:"))
+          failure msg = liftIO $ assertFailure $ "Expected file path to be stripped but got " <> T.unpack msg
+      Lens.mapMOf_ offenders failure notification
   ]
 
 codeActionTests :: TestTree
@@ -459,29 +479,25 @@ watchedFilesTests :: TestTree
 watchedFilesTests = testGroup "watched files"
   [ testSession' "workspace files" $ \sessionDir -> do
       liftIO $ writeFile (sessionDir </> "hie.yaml") "cradle: {direct: {arguments: [\"-isrc\"]}}"
-      _doc <- openDoc' "A.hs" "haskell" "{-#LANGUAGE NoImplicitPrelude #-}\nmodule A where\nimport WatchedFilesMissingModule"
+      _doc <- createDoc "A.hs" "haskell" "{-#LANGUAGE NoImplicitPrelude #-}\nmodule A where\nimport WatchedFilesMissingModule"
       watchedFileRegs <- getWatchedFilesSubscriptionsUntil @PublishDiagnosticsNotification
 
-      -- Expect 6 subscriptions (A does not get any because it's VFS):
+      -- Expect 4 subscriptions (A does not get any because it's VFS):
       --  - /path-to-workspace/WatchedFilesMissingModule.hs
       --  - /path-to-workspace/WatchedFilesMissingModule.lhs
-      --  - WatchedFilesMissingModule.hs
-      --  - WatchedFilesMissingModule.lhs
-      --  - src/WatchedFilesMissingModule.hs
-      --  - src/WatchedFilesMissingModule.lhs
-      liftIO $ length watchedFileRegs @?= 6
+      --  - /path-to-workspace/src/WatchedFilesMissingModule.hs
+      --  - /path-to-workspace/src/WatchedFilesMissingModule.lhs
+      liftIO $ length watchedFileRegs @?= 4
 
   , testSession' "non workspace file" $ \sessionDir -> do
       liftIO $ writeFile (sessionDir </> "hie.yaml") "cradle: {direct: {arguments: [\"-i/tmp\"]}}"
-      _doc <- openDoc' "A.hs" "haskell" "{-# LANGUAGE NoImplicitPrelude#-}\nmodule A where\nimport WatchedFilesMissingModule"
+      _doc <- createDoc "A.hs" "haskell" "{-# LANGUAGE NoImplicitPrelude#-}\nmodule A where\nimport WatchedFilesMissingModule"
       watchedFileRegs <- getWatchedFilesSubscriptionsUntil @PublishDiagnosticsNotification
 
-      -- Expect 4 subscriptions (/tmp does not get any as it is out of the workspace):
+      -- Expect 2 subscriptions (/tmp does not get any as it is out of the workspace):
       --  - /path-to-workspace/WatchedFilesMissingModule.hs
       --  - /path-to-workspace/WatchedFilesMissingModule.lhs
-      --  - WatchedFilesMissingModule.hs
-      --  - WatchedFilesMissingModule.lhs
-      liftIO $ length watchedFileRegs @?= 4
+      liftIO $ length watchedFileRegs @?= 2
 
   -- TODO add a test for didChangeWorkspaceFolder
   ]
@@ -494,7 +510,7 @@ renameActionTests = testGroup "rename actions"
             , "foo :: Int -> Int"
             , "foo argName = argNme"
             ]
-      doc <- openDoc' "Testing.hs" "haskell" content
+      doc <- createDoc "Testing.hs" "haskell" content
       _ <- waitForDiagnostics
       action <- findCodeAction doc (Range (Position 2 14) (Position 2 20)) "Replace with ‘argName’"
       executeCodeAction action
@@ -512,7 +528,7 @@ renameActionTests = testGroup "rename actions"
             , "foo :: Maybe a -> [a]"
             , "foo = maybToList"
             ]
-      doc <- openDoc' "Testing.hs" "haskell" content
+      doc <- createDoc "Testing.hs" "haskell" content
       _ <- waitForDiagnostics
       action <- findCodeAction doc (Range (Position 3 6) (Position 3 16))  "Replace with ‘maybeToList’"
       executeCodeAction action
@@ -530,7 +546,7 @@ renameActionTests = testGroup "rename actions"
             , "foo :: Char -> Char -> Char -> Char"
             , "foo argument1 argument2 argument3 = argumentX"
             ]
-      doc <- openDoc' "Testing.hs" "haskell" content
+      doc <- createDoc "Testing.hs" "haskell" content
       _ <- waitForDiagnostics
       _ <- findCodeActions doc (Range (Position 2 36) (Position 2 45))
                            ["Replace with ‘argument1’", "Replace with ‘argument2’", "Replace with ‘argument3’"]
@@ -542,7 +558,7 @@ renameActionTests = testGroup "rename actions"
             , "monus x y = max 0 (x - y)"
             , "foo x y = x `monnus` y"
             ]
-      doc <- openDoc' "Testing.hs" "haskell" content
+      doc <- createDoc "Testing.hs" "haskell" content
       _ <- waitForDiagnostics
       actionsOrCommands <- getCodeActions doc (Range (Position 3 12) (Position 3 20))
       [fixTypo] <- pure [action | CACodeAction action@CodeAction{ _title = actionTitle } <- actionsOrCommands, "monus" `T.isInfixOf` actionTitle ]
@@ -565,7 +581,7 @@ typeWildCardActionTests = testGroup "type wildcard actions"
             , "func :: _"
             , "func x = x"
             ]
-      doc <- openDoc' "Testing.hs" "haskell" content
+      doc <- createDoc "Testing.hs" "haskell" content
       _ <- waitForDiagnostics
       actionsOrCommands <- getCodeActions doc (Range (Position 2 1) (Position 2 10))
       let [addSignature] = [action | CACodeAction action@CodeAction { _title = actionTitle } <- actionsOrCommands
@@ -585,7 +601,7 @@ typeWildCardActionTests = testGroup "type wildcard actions"
             , "func :: _"
             , "func x y = x + y"
             ]
-      doc <- openDoc' "Testing.hs" "haskell" content
+      doc <- createDoc "Testing.hs" "haskell" content
       _ <- waitForDiagnostics
       actionsOrCommands <- getCodeActions doc (Range (Position 2 1) (Position 2 10))
       let [addSignature] = [action | CACodeAction action@CodeAction { _title = actionTitle } <- actionsOrCommands
@@ -608,7 +624,7 @@ typeWildCardActionTests = testGroup "type wildcard actions"
             , "      y = x * 2"
             , "  in y"
             ]
-      doc <- openDoc' "Testing.hs" "haskell" content
+      doc <- createDoc "Testing.hs" "haskell" content
       _ <- waitForDiagnostics
       actionsOrCommands <- getCodeActions doc (Range (Position 4 1) (Position 4 10))
       let [addSignature] = [action | CACodeAction action@CodeAction { _title = actionTitle } <- actionsOrCommands
@@ -633,7 +649,7 @@ removeImportTests = testGroup "remove import actions"
       let contentA = T.unlines
             [ "module ModuleA where"
             ]
-      _docA <- openDoc' "ModuleA.hs" "haskell" contentA
+      _docA <- createDoc "ModuleA.hs" "haskell" contentA
       let contentB = T.unlines
             [ "{-# OPTIONS_GHC -Wunused-imports #-}"
             , "module ModuleB where"
@@ -641,7 +657,7 @@ removeImportTests = testGroup "remove import actions"
             , "stuffB :: Integer"
             , "stuffB = 123"
             ]
-      docB <- openDoc' "ModuleB.hs" "haskell" contentB
+      docB <- createDoc "ModuleB.hs" "haskell" contentB
       _ <- waitForDiagnostics
       [CACodeAction action@CodeAction { _title = actionTitle }]
           <- getCodeActions docB (Range (Position 2 0) (Position 2 5))
@@ -659,7 +675,7 @@ removeImportTests = testGroup "remove import actions"
       let contentA = T.unlines
             [ "module ModuleA where"
             ]
-      _docA <- openDoc' "ModuleA.hs" "haskell" contentA
+      _docA <- createDoc "ModuleA.hs" "haskell" contentA
       let contentB = T.unlines
             [ "{-# OPTIONS_GHC -Wunused-imports #-}"
             , "module ModuleB where"
@@ -667,7 +683,7 @@ removeImportTests = testGroup "remove import actions"
             , "stuffB :: Integer"
             , "stuffB = 123"
             ]
-      docB <- openDoc' "ModuleB.hs" "haskell" contentB
+      docB <- createDoc "ModuleB.hs" "haskell" contentB
       _ <- waitForDiagnostics
       [CACodeAction action@CodeAction { _title = actionTitle }]
           <- getCodeActions docB (Range (Position 2 0) (Position 2 5))
@@ -689,14 +705,14 @@ removeImportTests = testGroup "remove import actions"
             , "stuffB = 123"
             , "stuffC = ()"
             ]
-      _docA <- openDoc' "ModuleA.hs" "haskell" contentA
+      _docA <- createDoc "ModuleA.hs" "haskell" contentA
       let contentB = T.unlines
             [ "{-# OPTIONS_GHC -Wunused-imports #-}"
             , "module ModuleB where"
             , "import ModuleA (stuffA, stuffB, stuffC, stuffA)"
             , "main = print stuffB"
             ]
-      docB <- openDoc' "ModuleB.hs" "haskell" contentB
+      docB <- createDoc "ModuleB.hs" "haskell" contentB
       _ <- waitForDiagnostics
       [CACodeAction action@CodeAction { _title = actionTitle }]
           <- getCodeActions docB (Range (Position 2 0) (Position 2 5))
@@ -718,22 +734,18 @@ removeImportTests = testGroup "remove import actions"
             , "stuffB :: Integer"
             , "stuffB = 123"
             ]
-      _docA <- openDoc' "ModuleA.hs" "haskell" contentA
+      _docA <- createDoc "ModuleA.hs" "haskell" contentA
       let contentB = T.unlines
             [ "{-# OPTIONS_GHC -Wunused-imports #-}"
             , "module ModuleB where"
             , "import qualified ModuleA as A ((<?>), stuffB, (!!))"
             , "main = print A.stuffB"
             ]
-      docB <- openDoc' "ModuleB.hs" "haskell" contentB
+      docB <- createDoc "ModuleB.hs" "haskell" contentB
       _ <- waitForDiagnostics
       [CACodeAction action@CodeAction { _title = actionTitle }]
           <- getCodeActions docB (Range (Position 2 0) (Position 2 5))
-#if MIN_GHC_API_VERSION(8,6,0)
       liftIO $ "Remove !!, <?> from import" @=? actionTitle
-#else
-      liftIO $ "Remove A.!!, A.<?> from import" @=? actionTitle
-#endif
       executeCodeAction action
       contentAfterAction <- documentContents docB
       let expectedContentAfterAction = T.unlines
@@ -750,14 +762,14 @@ removeImportTests = testGroup "remove import actions"
             , "stuffB :: Integer"
             , "stuffB = 123"
             ]
-      _docA <- openDoc' "ModuleA.hs" "haskell" contentA
+      _docA <- createDoc "ModuleA.hs" "haskell" contentA
       let contentB = T.unlines
             [ "{-# OPTIONS_GHC -Wunused-imports #-}"
             , "module ModuleB where"
             , "import ModuleA (A(..), stuffB)"
             , "main = print stuffB"
             ]
-      docB <- openDoc' "ModuleB.hs" "haskell" contentB
+      docB <- createDoc "ModuleB.hs" "haskell" contentB
       _ <- waitForDiagnostics
       [CACodeAction action@CodeAction { _title = actionTitle }]
           <- getCodeActions docB (Range (Position 2 0) (Position 2 5))
@@ -777,14 +789,14 @@ removeImportTests = testGroup "remove import actions"
             , "data D = A | B"
             , "data E = F"
             ]
-      _docA <- openDoc' "ModuleA.hs" "haskell" contentA
+      _docA <- createDoc "ModuleA.hs" "haskell" contentA
       let contentB = T.unlines
             [ "{-# OPTIONS_GHC -Wunused-imports #-}"
             , "module ModuleB where"
             , "import ModuleA (D(A,B), E(F))"
             , "main = B"
             ]
-      docB <- openDoc' "ModuleB.hs" "haskell" contentB
+      docB <- createDoc "ModuleB.hs" "haskell" contentB
       _ <- waitForDiagnostics
       [CACodeAction action@CodeAction { _title = actionTitle }]
           <- getCodeActions docB (Range (Position 2 0) (Position 2 5))
@@ -925,8 +937,8 @@ extendImportTests = testGroup "extend import actions"
   ]
   where
     template contentA contentB range expectedAction expectedContentB = do
-      _docA <- openDoc' "ModuleA.hs" "haskell" contentA
-      docB <- openDoc' "ModuleB.hs" "haskell" contentB
+      _docA <- createDoc "ModuleA.hs" "haskell" contentA
+      docB <- createDoc "ModuleB.hs" "haskell" contentB
       _ <- waitForDiagnostics
       CACodeAction action@CodeAction { _title = actionTitle } : _
                   <- sortOn (\(CACodeAction CodeAction{_title=x}) -> x) <$>
@@ -976,7 +988,7 @@ suggestImportTests = testGroup "suggest import actions"
           after  = T.unlines $ "module A where" : ["import " <> x | x <- imps] ++ [newImp] ++ def : other
           cradle = "cradle: {direct: {arguments: [-hide-all-packages, -package, base, -package, text, -package-env, -]}}"
       liftIO $ writeFileUTF8 (dir </> "hie.yaml") cradle
-      doc <- openDoc' "Test.hs" "haskell" before
+      doc <- createDoc "Test.hs" "haskell" before
       _diags <- waitForDiagnostics
       let defLine = length imps + 1
           range = Range (Position defLine 0) (Position defLine maxBound)
@@ -1036,7 +1048,7 @@ addExtensionTests = testGroup "add language extension actions"
   ]
     where
       template initialContent range expectedAction expectedContents = do
-        doc <- openDoc' "Module.hs" "haskell" initialContent
+        doc <- createDoc "Module.hs" "haskell" initialContent
         _ <- waitForDiagnostics
         CACodeAction action@CodeAction { _title = actionTitle } : _
                     <- sortOn (\(CACodeAction CodeAction{_title=x}) -> x) <$>
@@ -1059,7 +1071,7 @@ insertNewDefinitionTests = testGroup "insert new definition actions"
             [""
             ,"someOtherCode = ()"
             ]
-      docB <- openDoc' "ModuleB.hs" "haskell" (T.unlines $ txtB ++ txtB')
+      docB <- createDoc "ModuleB.hs" "haskell" (T.unlines $ txtB ++ txtB')
       _ <- waitForDiagnostics
       CACodeAction action@CodeAction { _title = actionTitle } : _
                   <- sortOn (\(CACodeAction CodeAction{_title=x}) -> x) <$>
@@ -1083,7 +1095,7 @@ insertNewDefinitionTests = testGroup "insert new definition actions"
             [""
             ,"someOtherCode = ()"
             ]
-      docB <- openDoc' "ModuleB.hs" "haskell" (T.unlines $ txtB ++ txtB')
+      docB <- createDoc "ModuleB.hs" "haskell" (T.unlines $ txtB ++ txtB')
       _ <- waitForDiagnostics
       CACodeAction action@CodeAction { _title = actionTitle } : _
                   <- sortOn (\(CACodeAction CodeAction{_title=x}) -> x) <$>
@@ -1122,8 +1134,8 @@ fixConstructorImportTests = testGroup "fix import actions"
   ]
   where
     template contentA contentB range expectedAction expectedContentB = do
-      _docA <- openDoc' "ModuleA.hs" "haskell" contentA
-      docB  <- openDoc' "ModuleB.hs" "haskell" contentB
+      _docA <- createDoc "ModuleA.hs" "haskell" contentA
+      docB  <- createDoc "ModuleB.hs" "haskell" contentB
       _diags <- waitForDiagnostics
       CACodeAction action@CodeAction { _title = actionTitle } : _
                   <- sortOn (\(CACodeAction CodeAction{_title=x}) -> x) <$>
@@ -1142,7 +1154,7 @@ importRenameActionTests = testGroup "import rename actions"
             [ "module Testing where"
             , "import Data.Mape"
             ]
-      doc <- openDoc' "Testing.hs" "haskell" content
+      doc <- createDoc "Testing.hs" "haskell" content
       _ <- waitForDiagnostics
       actionsOrCommands <- getCodeActions doc (Range (Position 2 8) (Position 2 16))
       let [changeToMap] = [action | CACodeAction action@CodeAction{ _title = actionTitle } <- actionsOrCommands, ("Data." <> modname) `T.isInfixOf` actionTitle ]
@@ -1179,7 +1191,7 @@ fillTypedHoleTests = let
         newA newB newC = testSession (T.unpack actionTitle) $ do
     let originalCode = sourceCode oldA oldB oldC
     let expectedCode = sourceCode newA newB newC
-    doc <- openDoc' "Testing.hs" "haskell" originalCode
+    doc <- createDoc "Testing.hs" "haskell" originalCode
     _ <- waitForDiagnostics
     actionsOrCommands <- getCodeActions doc (Range (Position 9 0) (Position 9 maxBound))
     chosenAction <- liftIO $ pickActionWithTitle actionTitle actionsOrCommands
@@ -1227,7 +1239,7 @@ addSigActionTests = let
   def >:: sig = testSession (T.unpack def) $ do
     let originalCode = before def
     let expectedCode = after' def sig
-    doc <- openDoc' "Sigs.hs" "haskell" originalCode
+    doc <- createDoc "Sigs.hs" "haskell" originalCode
     _ <- waitForDiagnostics
     actionsOrCommands <- getCodeActions doc (Range (Position 3 1) (Position 3 maxBound))
     chosenAction <- liftIO $ pickActionWithTitle ("add signature: " <> sig) actionsOrCommands
@@ -1259,7 +1271,7 @@ addSigLensesTests = let
   sigSession withMissing def sig = testSession (T.unpack def) $ do
     let originalCode = before withMissing def
     let expectedCode = after' withMissing def sig
-    doc <- openDoc' "Sigs.hs" "haskell" originalCode
+    doc <- createDoc "Sigs.hs" "haskell" originalCode
     [CodeLens {_command = Just c}] <- getCodeLenses doc
     executeCommand c
     modifiedCode <- getDocumentEdit doc
@@ -1354,7 +1366,8 @@ findDefinitionAndHoverTests = let
   mkFindTests tests = testGroup "get"
     [ testGroup "definition" $ mapMaybe fst tests
     , testGroup "hover"      $ mapMaybe snd tests
-    , testGroup "type-definition" $ typeDefinitionTests ]
+    , testGroup "type-definition" $ typeDefinitionTests
+    , checkFileCompiles sourceFilePath ]
 
   typeDefinitionTests = [ tst (getTypeDefinitions, checkDefs) dcL7 (pure tcData) "Saturated data con"
                         , tst (getTypeDefinitions, checkDefs) opL16 (pure [ExpectNoDefinitions]) "Polymorphic variable"]
@@ -1451,8 +1464,15 @@ findDefinitionAndHoverTests = let
         broken = Just . (`xfail` "known broken")
         no = const Nothing -- don't run this test at all
 
+checkFileCompiles :: FilePath -> TestTree
+checkFileCompiles fp =
+  testSessionWait ("Does " ++ fp ++ " compile") $
+    void (openTestDataDoc fp)
+
+
 pluginTests :: TestTree
-pluginTests = testSessionWait "plugins" $ do
+pluginTests = (`xfail8101` "known broken (#556)")
+            $ testSessionWait "plugins" $ do
   let content =
         T.unlines
           [ "{-# OPTIONS_GHC -fplugin GHC.TypeLits.KnownNat.Solver #-}"
@@ -1466,7 +1486,7 @@ pluginTests = testSessionWait "plugins" $ do
           , "foo :: Int -> Int -> Int"
           , "foo a b = a + c"
           ]
-  _ <- openDoc' "Testing.hs" "haskell" content
+  _ <- createDoc "Testing.hs" "haskell" content
   expectDiagnostics
     [ ( "Testing.hs",
         [(DsError, (8, 14), "Variable not in scope: c")]
@@ -1493,7 +1513,7 @@ cppTests =
                       run $ expectError content (2, 1)
                   )
     , testSessionWait "cpp-ghcide" $ do
-        _ <- openDoc' "A.hs" "haskell" $ T.unlines
+        _ <- createDoc "A.hs" "haskell" $ T.unlines
           ["{-# LANGUAGE CPP #-}"
           ,"main ="
           ,"#ifdef __GHCIDE__"
@@ -1507,7 +1527,7 @@ cppTests =
   where
     expectError :: T.Text -> Cursor -> Session ()
     expectError content cursor = do
-      _ <- openDoc' "Testing.hs" "haskell" content
+      _ <- createDoc "Testing.hs" "haskell" content
       expectDiagnostics
         [ ( "Testing.hs",
             [(DsError, cursor, "error: unterminated")]
@@ -1523,7 +1543,7 @@ preprocessorTests = testSessionWait "preprocessor" $ do
           , "module Testing where"
           , "y = x + z" -- plugin replaces x with y, making this have only one diagnostic
           ]
-  _ <- openDoc' "Testing.hs" "haskell" content
+  _ <- createDoc "Testing.hs" "haskell" content
   expectDiagnostics
     [ ( "Testing.hs",
         [(DsError, (2, 8), "Variable not in scope: z")]
@@ -1556,8 +1576,8 @@ safeTests =
                 ,"safeId = trustWorthyId"
                 ]
 
-        _ <- openDoc' "A.hs" "haskell" sourceA
-        _ <- openDoc' "B.hs" "haskell" sourceB
+        _ <- createDoc "A.hs" "haskell" sourceA
+        _ <- createDoc "B.hs" "haskell" sourceB
         expectNoMoreDiagnostics 1 ]
 
 thTests :: TestTree
@@ -1585,8 +1605,8 @@ thTests =
                   "b :: Integer",
                   "b = $(litE $ IntegerL $ a) + n"
                 ]
-        _ <- openDoc' "A.hs" "haskell" sourceA
-        _ <- openDoc' "B.hs" "haskell" sourceB
+        _ <- createDoc "A.hs" "haskell" sourceA
+        _ <- createDoc "B.hs" "haskell" sourceB
         expectDiagnostics [ ( "B.hs", [(DsError, (6, 29), "Variable not in scope: n")] ) ]
     , testSessionWait "newtype-closure" $ do
         let sourceA =
@@ -1606,8 +1626,8 @@ thTests =
                 ,"import A"
                 ,"b :: Int"
                 ,"b = $( a )" ]
-        _ <- openDoc' "A.hs" "haskell" sourceA
-        _ <- openDoc' "B.hs" "haskell" sourceB
+        _ <- createDoc "A.hs" "haskell" sourceA
+        _ <- createDoc "B.hs" "haskell" sourceB
         return ()
     ]
 
@@ -1616,7 +1636,7 @@ completionTests
   = testGroup "completion"
     [ testSessionWait "variable" $ do
         let source = T.unlines ["module A where", "f = hea"]
-        docId <- openDoc' "A.hs" "haskell" source
+        docId <- createDoc "A.hs" "haskell" source
         compls <- getCompletions docId (Position 1 7)
         liftIO $ map dropDocs compls @?=
           [complItem "head" (Just CiFunction) (Just "[a] -> a")]
@@ -1628,7 +1648,7 @@ completionTests
                                      ]
     , testSessionWait "constructor" $ do
         let source = T.unlines ["module A where", "f = Tru"]
-        docId <- openDoc' "A.hs" "haskell" source
+        docId <- createDoc "A.hs" "haskell" source
         compls <- getCompletions docId (Position 1 7)
         liftIO $ map dropDocs compls @?=
           [ complItem "True" (Just CiConstructor) (Just "Bool")
@@ -1640,7 +1660,7 @@ completionTests
           ]
     , testSessionWait "type" $ do
         let source = T.unlines ["{-# OPTIONS_GHC -Wall #-}", "module A () where", "f :: ()", "f = ()"]
-        docId <- openDoc' "A.hs" "haskell" source
+        docId <- createDoc "A.hs" "haskell" source
         expectDiagnostics [ ("A.hs", [(DsWarning, (3,0), "not used")]) ]
         changeDoc docId [TextDocumentContentChangeEvent Nothing Nothing $ T.unlines ["{-# OPTIONS_GHC -Wall #-}", "module A () where", "f :: Bo", "f = True"]]
         compls <- getCompletions docId (Position 2 7)
@@ -1657,7 +1677,7 @@ completionTests
         checkDocText "Bool" boolDocs [ "Defined in 'Prelude'" ]
     , testSessionWait "qualified" $ do
         let source = T.unlines ["{-# OPTIONS_GHC -Wunused-binds #-}", "module A () where", "f = ()"]
-        docId <- openDoc' "A.hs" "haskell" source
+        docId <- createDoc "A.hs" "haskell" source
         expectDiagnostics [ ("A.hs", [(DsWarning, (2, 0), "not used")]) ]
         changeDoc docId [TextDocumentContentChangeEvent Nothing Nothing $ T.unlines ["{-# OPTIONS_GHC -Wunused-binds #-}", "module A () where", "f = Prelude.hea"]]
         compls <- getCompletions docId (Position 2 15)
@@ -1671,7 +1691,7 @@ completionTests
                                      ]
     , testSessionWait "keyword" $ do
         let source = T.unlines ["module A where", "f = newty"]
-        docId <- openDoc' "A.hs" "haskell" source
+        docId <- createDoc "A.hs" "haskell" source
         compls <- getCompletions docId (Position 1 9)
         liftIO $ compls @?= [keywordItem "newtype"]
     , testSessionWait "type context" $ do
@@ -1680,7 +1700,7 @@ completionTests
                 , "module A () where"
                 , "f = f"
                 ]
-        docId <- openDoc' "A.hs" "haskell" source
+        docId <- createDoc "A.hs" "haskell" source
         expectDiagnostics [("A.hs", [(DsWarning, (2, 0), "not used")])]
         changeDoc docId
              [ TextDocumentContentChangeEvent Nothing Nothing $ T.unlines
@@ -1748,7 +1768,7 @@ outlineTests = testGroup
   "outline"
   [ testSessionWait "type class" $ do
     let source = T.unlines ["module A where", "class A a where a :: a -> Bool"]
-    docId   <- openDoc' "A.hs" "haskell" source
+    docId   <- createDoc "A.hs" "haskell" source
     symbols <- getDocumentSymbols docId
     liftIO $ symbols @?= Left
       [ moduleSymbol
@@ -1761,7 +1781,7 @@ outlineTests = testGroup
       ]
   , testSessionWait "type class instance " $ do
     let source = T.unlines ["class A a where", "instance A () where"]
-    docId   <- openDoc' "A.hs" "haskell" source
+    docId   <- createDoc "A.hs" "haskell" source
     symbols <- getDocumentSymbols docId
     liftIO $ symbols @?= Left
       [ classSymbol "A a" (R 0 0 0 15) []
@@ -1769,7 +1789,7 @@ outlineTests = testGroup
       ]
   , testSessionWait "type family" $ do
     let source = T.unlines ["{-# language TypeFamilies #-}", "type family A"]
-    docId   <- openDoc' "A.hs" "haskell" source
+    docId   <- createDoc "A.hs" "haskell" source
     symbols <- getDocumentSymbols docId
     liftIO $ symbols @?= Left [docSymbolD "A" "type family" SkClass (R 1 0 1 13)]
   , testSessionWait "type family instance " $ do
@@ -1778,7 +1798,7 @@ outlineTests = testGroup
           , "type family A a"
           , "type instance A () = ()"
           ]
-    docId   <- openDoc' "A.hs" "haskell" source
+    docId   <- createDoc "A.hs" "haskell" source
     symbols <- getDocumentSymbols docId
     liftIO $ symbols @?= Left
       [ docSymbolD "A a"   "type family" SkClass     (R 1 0 1 15)
@@ -1786,7 +1806,7 @@ outlineTests = testGroup
       ]
   , testSessionWait "data family" $ do
     let source = T.unlines ["{-# language TypeFamilies #-}", "data family A"]
-    docId   <- openDoc' "A.hs" "haskell" source
+    docId   <- createDoc "A.hs" "haskell" source
     symbols <- getDocumentSymbols docId
     liftIO $ symbols @?= Left [docSymbolD "A" "data family" SkClass (R 1 0 1 11)]
   , testSessionWait "data family instance " $ do
@@ -1795,7 +1815,7 @@ outlineTests = testGroup
           , "data family A a"
           , "data instance A () = A ()"
           ]
-    docId   <- openDoc' "A.hs" "haskell" source
+    docId   <- createDoc "A.hs" "haskell" source
     symbols <- getDocumentSymbols docId
     liftIO $ symbols @?= Left
       [ docSymbolD "A a"   "data family" SkClass     (R 1 0 1 11)
@@ -1803,36 +1823,36 @@ outlineTests = testGroup
       ]
   , testSessionWait "constant" $ do
     let source = T.unlines ["a = ()"]
-    docId   <- openDoc' "A.hs" "haskell" source
+    docId   <- createDoc "A.hs" "haskell" source
     symbols <- getDocumentSymbols docId
     liftIO $ symbols @?= Left
       [docSymbol "a" SkFunction (R 0 0 0 6)]
   , testSessionWait "pattern" $ do
     let source = T.unlines ["Just foo = Just 21"]
-    docId   <- openDoc' "A.hs" "haskell" source
+    docId   <- createDoc "A.hs" "haskell" source
     symbols <- getDocumentSymbols docId
     liftIO $ symbols @?= Left
       [docSymbol "Just foo" SkFunction (R 0 0 0 18)]
   , testSessionWait "pattern with type signature" $ do
     let source = T.unlines ["{-# language ScopedTypeVariables #-}", "a :: () = ()"]
-    docId   <- openDoc' "A.hs" "haskell" source
+    docId   <- createDoc "A.hs" "haskell" source
     symbols <- getDocumentSymbols docId
     liftIO $ symbols @?= Left
       [docSymbol "a :: ()" SkFunction (R 1 0 1 12)]
   , testSessionWait "function" $ do
     let source = T.unlines ["a x = ()"]
-    docId   <- openDoc' "A.hs" "haskell" source
+    docId   <- createDoc "A.hs" "haskell" source
     symbols <- getDocumentSymbols docId
     liftIO $ symbols @?= Left [docSymbol "a" SkFunction (R 0 0 0 8)]
   , testSessionWait "type synonym" $ do
     let source = T.unlines ["type A = Bool"]
-    docId   <- openDoc' "A.hs" "haskell" source
+    docId   <- createDoc "A.hs" "haskell" source
     symbols <- getDocumentSymbols docId
     liftIO $ symbols @?= Left
       [docSymbol' "A" SkTypeParameter (R 0 0 0 13) (R 0 5 0 6)]
   , testSessionWait "datatype" $ do
     let source = T.unlines ["data A = C"]
-    docId   <- openDoc' "A.hs" "haskell" source
+    docId   <- createDoc "A.hs" "haskell" source
     symbols <- getDocumentSymbols docId
     liftIO $ symbols @?= Left
       [ docSymbolWithChildren "A"
@@ -1840,9 +1860,21 @@ outlineTests = testGroup
                               (R 0 0 0 10)
                               [docSymbol "C" SkConstructor (R 0 9 0 10)]
       ]
+  , testSessionWait "record fields" $ do
+    let source = T.unlines ["data A = B {", "  x :: Int", "  , y :: Int}"]
+    docId   <- createDoc "A.hs" "haskell" source
+    symbols <- getDocumentSymbols docId
+    liftIO $ symbols @=? Left
+      [ docSymbolWithChildren "A" SkStruct (R 0 0 2 13)
+          [ docSymbolWithChildren' "B" SkConstructor (R 0 9 2 13) (R 0 9 0 10)
+            [ docSymbol "x" SkField (R 1 2 1 3)
+            , docSymbol "y" SkField (R 2 4 2 5)
+            ]
+          ]
+      ]
   , testSessionWait "import" $ do
     let source = T.unlines ["import Data.Maybe"]
-    docId   <- openDoc' "A.hs" "haskell" source
+    docId   <- createDoc "A.hs" "haskell" source
     symbols <- getDocumentSymbols docId
     liftIO $ symbols @?= Left
       [docSymbolWithChildren "imports"
@@ -1853,7 +1885,7 @@ outlineTests = testGroup
       ]
   , testSessionWait "multiple import" $ do
     let source = T.unlines ["", "import Data.Maybe", "", "import Control.Exception", ""]
-    docId   <- openDoc' "A.hs" "haskell" source
+    docId   <- createDoc "A.hs" "haskell" source
     symbols <- getDocumentSymbols docId
     liftIO $ symbols @?= Left
       [docSymbolWithChildren "imports"
@@ -1868,7 +1900,7 @@ outlineTests = testGroup
           [ "{-# language ForeignFunctionInterface #-}"
           , "foreign import ccall \"a\" a :: Int"
           ]
-    docId   <- openDoc' "A.hs" "haskell" source
+    docId   <- createDoc "A.hs" "haskell" source
     symbols <- getDocumentSymbols docId
     liftIO $ symbols @?= Left [docSymbolD "a" "import" SkObject (R 1 0 1 33)]
   , testSessionWait "foreign export" $ do
@@ -1876,7 +1908,7 @@ outlineTests = testGroup
           [ "{-# language ForeignFunctionInterface #-}"
           , "foreign export ccall odd :: Int -> Bool"
           ]
-    docId   <- openDoc' "A.hs" "haskell" source
+    docId   <- createDoc "A.hs" "haskell" source
     symbols <- getDocumentSymbols docId
     liftIO $ symbols @?= Left [docSymbolD "odd" "export" SkObject (R 1 0 1 39)]
   ]
@@ -1889,6 +1921,8 @@ outlineTests = testGroup
     DocumentSymbol name (Just detail) kind Nothing loc loc Nothing
   docSymbolWithChildren name kind loc cc =
     DocumentSymbol name Nothing kind Nothing loc loc (Just $ List cc)
+  docSymbolWithChildren' name kind loc selectionLoc cc =
+    DocumentSymbol name Nothing kind Nothing loc selectionLoc (Just $ List cc)
   moduleSymbol name loc cc = DocumentSymbol name
                                             Nothing
                                             SkFile
@@ -1909,6 +1943,13 @@ pattern R x y x' y' = Range (Position x y) (Position x' y')
 
 xfail :: TestTree -> String -> TestTree
 xfail = flip expectFailBecause
+
+xfail8101 :: TestTree -> String -> TestTree
+#if MIN_GHC_API_VERSION(8,10,0)
+xfail8101 = flip expectFailBecause
+#else
+xfail8101 t _ = t
+#endif
 
 data Expect
   = ExpectRange Range -- Both gotoDef and hover should report this range
@@ -2001,15 +2042,51 @@ loadCradleOnlyonce = testGroup "load cradle only once"
             test dir
         implicit dir = test dir
         test _dir = do
-            doc <- openDoc' "B.hs" "haskell" "module B where\nimport Data.Foo"
+            doc <- createDoc "B.hs" "haskell" "module B where\nimport Data.Foo"
             msgs <- someTill (skipManyTill anyMessage cradleLoadedMessage) (skipManyTill anyMessage (message @PublishDiagnosticsNotification))
             liftIO $ length msgs @?= 1
             changeDoc doc [TextDocumentContentChangeEvent Nothing Nothing "module B where\nimport Data.Maybe"]
             msgs <- manyTill (skipManyTill anyMessage cradleLoadedMessage) (skipManyTill anyMessage (message @PublishDiagnosticsNotification))
             liftIO $ length msgs @?= 0
-            _ <- openDoc' "A.hs" "haskell" "module A where\nimport LoadCradleBar"
+            _ <- createDoc "A.hs" "haskell" "module A where\nimport LoadCradleBar"
             msgs <- manyTill (skipManyTill anyMessage cradleLoadedMessage) (skipManyTill anyMessage (message @PublishDiagnosticsNotification))
             liftIO $ length msgs @?= 0
+
+
+dependentFileTest :: TestTree
+dependentFileTest = testGroup "addDependentFile"
+    [testGroup "file-changed" [testSession' "test" test]
+    ]
+    where
+      test dir = do
+        -- If the file contains B then no type error
+        -- otherwise type error
+        liftIO $ writeFile (dir </> "dep-file.txt") "A"
+        let fooContent = T.unlines
+              [ "{-# LANGUAGE TemplateHaskell #-}"
+              , "module Foo where"
+              , "import Language.Haskell.TH.Syntax"
+              , "foo :: Int"
+              , "foo = 1 + $(do"
+              , "               qAddDependentFile \"dep-file.txt\""
+              , "               f <- qRunIO (readFile \"dep-file.txt\")"
+              , "               if f == \"B\" then [| 1 |] else lift f)"
+              ]
+        let bazContent = T.unlines ["module Baz where", "import Foo"]
+        _ <-createDoc "Foo.hs" "haskell" fooContent
+        doc <- createDoc "Baz.hs" "haskell" bazContent
+        expectDiagnostics
+          [("Foo.hs", [(DsError, (4, 6), "Couldn't match expected type")])]
+        -- Now modify the dependent file
+        liftIO $ writeFile (dir </> "dep-file.txt") "B"
+        let change = TextDocumentContentChangeEvent
+              { _range = Just (Range (Position 2 0) (Position 2 6))
+              , _rangeLength = Nothing
+              , _text = "f = ()"
+              }
+        -- Modifying Baz will now trigger Foo to be rebuilt as well
+        changeDoc doc [change]
+        expectDiagnostics [("Foo.hs", [])]
 
 
 cradleLoadedMessage :: Session FromServerMessage
@@ -2029,7 +2106,7 @@ sessionDepsArePickedUp = testSession'
         (dir </> "hie.yaml")
         "cradle: {direct: {arguments: []}}"
     -- Open without OverloadedStrings and expect an error.
-    doc <- openDoc' "Foo.hs" "haskell" fooContent
+    doc <- createDoc "Foo.hs" "haskell" fooContent
     expectDiagnostics
       [("Foo.hs", [(DsError, (3, 6), "Couldn't match expected type")])]
     -- Update hie.yaml to enable OverloadedStrings.
@@ -2132,7 +2209,7 @@ runInDir dir s = do
 openTestDataDoc :: FilePath -> Session TextDocumentIdentifier
 openTestDataDoc path = do
   source <- liftIO $ readFileUtf8 $ "test/data" </> path
-  openDoc' path "haskell" source
+  createDoc path "haskell" source
 
 findCodeActions :: TextDocumentIdentifier -> Range -> [T.Text] -> Session [CodeAction]
 findCodeActions doc range expectedTitles = do
@@ -2172,20 +2249,6 @@ unitTests = do
          let uri = Uri "file://"
          uriToFilePath' uri @?= Just ""
      ]
-
--- | Wrapper around 'LSPTest.openDoc'' that sends file creation events
-openDoc' :: FilePath -> String -> T.Text -> Session TextDocumentIdentifier
-openDoc' fp name contents = do
-  res@(TextDocumentIdentifier uri) <- LSPTest.openDoc' fp name contents
-  -- Needed as ghcide sets up and relies on WatchedFiles but lsp-test does not track them
-  sendNotification WorkspaceDidChangeWatchedFiles (DidChangeWatchedFilesParams $ List [FileEvent uri FcCreated])
-  return res
-
--- | Version of 'LSPTest.openDoc'' that does not send WatchedFiles events for files outside the workspace
-openDoc'' :: FilePath -> String -> T.Text -> Session TextDocumentIdentifier
--- At the moment this is just LSPTest.openDoc' but it may change in the future
--- when/if lsp-test implements WatchedFiles
-openDoc'' = LSPTest.openDoc'
 
 positionMappingTests :: TestTree
 positionMappingTests =

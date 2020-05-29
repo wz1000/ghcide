@@ -10,6 +10,7 @@ module Main(main) where
 import Data.Time.Clock (UTCTime)
 import Linker (initDynLinker)
 import Data.IORef
+import NameCache
 import Packages
 import Module
 import Arguments
@@ -168,7 +169,6 @@ runIde dir Arguments{..} hiedb hiechan = do
                     , optShakeProfiling = argsShakeProfiling
                     , optTesting        = argsTesting
                     , optThreads        = argsThreads
-                    , optInterfaceLoadingDiagnostics = argsTesting
                     }
                 logLevel = if argsVerbose then minBound else Info
             debouncer <- newAsyncDebouncer
@@ -201,17 +201,6 @@ runIde dir Arguments{..} hiedb hiechan = do
         putStrLn "\nStep 4/6: Type checking the files"
         setFilesOfInterest ide $ HashSet.fromList $ map toNormalizedFilePath' files
         _ <- runActionSync "TypecheckTest" ide $ uses TypeCheck (map toNormalizedFilePath' files)
-  --        results <- runActionSync ide $ use TypeCheck $ toNormalizedFilePath' "src/Development/IDE/Core/Rules.hs"
-        {-
-        let fp =  toNormalizedFilePath' "ghc/Main.hs"
-        results <- runActionSync "tc" ide $ use TypeCheck $ toNormalizedFilePath' "ghc/Main.hs"
-        hover1 <- duration $ runIdeAction "Hover" ide $ getAtPoint fp (Position 950 20)
-        print hover1
-        traceMarkerIO "START"
-        hover2 <- duration $ runIdeAction "Hover" ide $ getAtPoint fp (Position 950 20)
-        print hover2
-        traceMarkerIO "END"
-        -}
         cancel worker
         return ()
 
@@ -530,8 +519,6 @@ if the dependencies of a component have really changed.
 E.g. when you load two executables, they can not depend on each other. They
 should be filtered out, such that we dont have to re-compile everything.
 -}
-
-
 setCacheDir :: MonadIO m => String -> [String] -> ComponentOptions -> DynFlags -> m DynFlags
 setCacheDir prefix hscComponents comps dflags = do
     cacheDir <- liftIO $ getCacheDir prefix (hscComponents ++ componentOptions comps)
