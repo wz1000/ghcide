@@ -46,6 +46,7 @@ import System.IO.Unsafe
 
 import IfaceType
 import Data.Either
+import Data.List.Extra (dropEnd)
 
 import HieDb (HieDb, search,RefRow(..), findDef, DefRow(..), Res, (:.)(..),ModuleInfo(..), dynFlagsForPrinting)
 
@@ -135,8 +136,12 @@ atPoint IdeOptions{} hf dm pos = listToMaybe $ pointCommand hf pos hoverInfo
   where
     -- Hover info for values/data
     hoverInfo ast =
-      (Just range, prettyNames ++ map wrapHaskell prettyTypes)
+      (Just range, prettyNames ++ pTypes)
       where
+        pTypes
+          | length names == 1 = dropEnd 1 $ map wrapHaskell prettyTypes
+          | otherwise = map wrapHaskell prettyTypes
+
         range = realSrcSpanToRange $ nodeSpan ast
 
         wrapHaskell x = "\n```haskell\n"<>x<>"\n```\n"
