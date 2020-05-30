@@ -138,7 +138,7 @@ getAtPoint file pos = fmap join $ runMaybeT $ do
   ide <- ask
   opts <- liftIO $ getIdeOptionsIO ide
 
-  ((hf,_), mapping) <- useE GetHieFile file
+  (HFR hf _, mapping) <- useE GetHieFile file
   PDocMap dm <- lift $ maybe (PDocMap mempty) fst <$> (runMaybeT $ useE GetDocMap file)
 
   !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
@@ -172,7 +172,7 @@ getDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe [Location])
 getDefinition file pos = runMaybeT $ do
     ide <- ask
     opts <- liftIO $ getIdeOptionsIO ide
-    (hf,_) <- fst <$> useE GetHieFile file
+    HFR hf _ <- fst <$> useE GetHieFile file
     hiedb <- lift $ hiedb <$> askShake
     liftIO $ L.logInfo (logger ide) $ "Got HieFile ###########"
     AtPoint.gotoDefinition hiedb (\_ _ _ -> MaybeT $ pure Nothing) opts hf pos
@@ -181,13 +181,13 @@ getTypeDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe [Locatio
 getTypeDefinition file pos = runMaybeT $ do
     ide <- ask
     opts <- liftIO $ getIdeOptionsIO ide
-    (hf,_) <- fst <$> useE GetHieFile file
+    HFR hf _ <- fst <$> useE GetHieFile file
     hiedb <- lift $ hiedb <$> askShake
     AtPoint.gotoTypeDefinition hiedb (\_ _ _ -> MaybeT $ pure Nothing) opts hf pos
 
 highlightAtPoint :: NormalizedFilePath -> Position -> IdeAction (Maybe [DocumentHighlight])
 highlightAtPoint file pos = runMaybeT $ do
-    ((hf, PRefMap rf),mapping) <- useE GetHieFile file
+    (HFR hf rf,mapping) <- useE GetHieFile file
     !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
     AtPoint.documentHighlight hf rf pos'
 
@@ -207,7 +207,7 @@ refsAtPoint file pos = runMaybeT $ do
 
     opts <- liftIO . getIdeOptionsIO =<< ask
 
-    ((hf,PRefMap rf),mapping) <- useE GetHieFile file
+    (HFR hf rf,mapping) <- useE GetHieFile file
     !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
     AtPoint.referencesAtPoint hiedb (\_ _ _ -> MaybeT $ pure Nothing) hf rf pos'
 
@@ -450,8 +450,8 @@ getHieFileRule =
           hsc  <- hscEnv <$> use_ GhcSession f
           ShakeExtras{hiedbChan} <- getShakeExtras
           liftIO $ generateAndWriteHieFile hsc hiedbChan (tmrModule tcm)
-      let refmap = PRefMap . generateReferencesMap . getAsts . hie_asts
-      pure $ fmap (\x -> (x,refmap x)) <$> hf
+      let refmap = generateReferencesMap . getAsts . hie_asts
+      pure $ fmap (\x -> HFR x $ refmap x) <$> hf
 
 persistentHieFileRule :: Rules ()
 persistentHieFileRule = addPersistentRule GetHieFile $ \file -> runMaybeT $ do
@@ -462,15 +462,15 @@ persistentHieFileRule = addPersistentRule GetHieFile $ \file -> runMaybeT $ do
   liftIO $ hPutStrLn stderr "LOADING HIE FILE *********************"
   res <- liftIO $ try @SomeException $ loadHieFile (mkUpdater nc) hie_loc
   liftIO $ hPutStrLn stderr "LOADED HIE FILE *********************"
-  let refmap = PRefMap . generateReferencesMap . getAsts . hie_asts
-  MaybeT $ pure $ either (const Nothing) (\x -> Just (x,refmap x))  res
+  let refmap = generateReferencesMap . getAsts . hie_asts
+  MaybeT $ pure $ either (const Nothing) (\x -> Just $ HFR x (refmap x))  res
 
 getDocMapRule :: Rules ()
 getDocMapRule =
     define $ \GetDocMap file -> do
       hmi <- tmrModInfo <$> use_ TypeCheck file
       hsc <- hscEnv <$> use_ GhcSession file
-      (_,(PRefMap rf)) <- use_ GetHieFile file
+      HFR _ rf <- use_ GetHieFile file
 
       deps <- fst <$> useWithStale GetDependencies file
       let tdeps = transitiveModuleDeps deps

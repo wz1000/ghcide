@@ -18,6 +18,7 @@ import Development.IDE.GHC.Util
 import           Data.Hashable
 import           Data.Typeable
 import qualified Data.Set as S
+import qualified Data.Map as M
 import           Development.Shake
 import           GHC.Generics                             (Generic)
 
@@ -27,7 +28,7 @@ import HscTypes (CgGuts, Linkable, HomeModInfo, ModDetails)
 
 import           Development.IDE.Spans.Common
 import           Development.IDE.Import.FindImports (ArtifactsLocation)
-import Development.IDE.GHC.Compat (RefMap, HieFile)
+import Development.IDE.GHC.Compat (RefMap, HieFile(..))
 
 -- NOTATION
 --   Foo+ means Foo for the dependencies
@@ -82,15 +83,16 @@ instance Show HiFileResult where
 -- | The type checked version of this file, requires TypeCheck+
 type instance RuleResult TypeCheck = TcModuleResult
 
+data HieFileResult = HFR { hieFile :: !HieFile, refmap :: !RefMap }
+
+instance NFData HieFileResult where
+    rnf (HFR hf rm) = rnf hf `seq` rnf (M.keys rm)
+
+instance Show HieFileResult where
+    show = show . hie_module . hieFile
+
 -- | Information about what spans occur where, requires TypeCheck
-type instance RuleResult GetHieFile = (HieFile, PRefMap)
-
-newtype PRefMap = PRefMap {getRefMap :: RefMap}
-instance NFData PRefMap where
-    rnf = rwhnf
-
-instance Show PRefMap where
-    show = const "refmap"
+type instance RuleResult GetHieFile = HieFileResult
 
 newtype PDocMap = PDocMap {getDocMap :: DocMap}
 instance NFData PDocMap where
