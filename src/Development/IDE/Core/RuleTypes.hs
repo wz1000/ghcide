@@ -97,7 +97,7 @@ type instance RuleResult TypeCheck = TcModuleResult
 data HieFileResult = HFR { hieFile :: !HieFile, refmap :: !RefMap }
 
 instance NFData HieFileResult where
-    rnf (HFR hf rm) = rnf hf `seq` rnf (M.keys rm)
+    rnf (HFR hf rm) = rnf hf `seq` rnf rm
 
 instance Show HieFileResult where
     show = show . hie_module . hieFile
