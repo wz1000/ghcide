@@ -425,27 +425,10 @@ getHieFileRule =
     define $ \GetHieFile f -> do
       pm <- use_ GetParsedModule f
       se <- getShakeExtras
-      staleHf <- liftIO $ runIdeAction "" se $ readHieFileFromDisk f
-      (diags,hf) <- case staleHf of
-        Just hf | hie_hs_src hf == pmrHash pm -> do
-          liftIO $ L.logInfo (logger se) $ "HIE file hash matched on disk: " <> T.pack (show f)
-
-          -- Queue an action to generate diagnostics
-          let sq = queue se
-          liftIO $ queueAction [mkDelayedAction ("HF:" ++ (show GetModIface)) (GetModIface, f) L.Debug (use GetModIface f)] sq
-
-          pure ([],Just hf)
-        _ -> do
-          case hie_hs_src <$> staleHf of
-            Nothing -> pure ()
-            Just h -> do
-              liftIO $ L.logInfo (logger se) $ "staleHash " <> T.pack (show h)
-              liftIO $ L.logInfo (logger se) $ "newHash " <> T.pack (show $ pmrHash pm)
-
-
-          liftIO $ L.logInfo (logger se) $ "Regenerating HIE File: " <> T.pack (show f)
-          (diags,tcm) <- typeCheckRuleDefinition f pm DoGenerateInterfaceFiles
-          pure (diags, tmrHieFile =<< tcm)
+      (diags,hf) <- do
+        liftIO $ L.logInfo (logger se) $ "Regenerating HIE File: " <> T.pack (show f)
+        (diags,tcm) <- typeCheckRuleDefinition f pm DoGenerateInterfaceFiles
+        pure (diags, tmrHieFile =<< tcm)
       let refmap = generateReferencesMap . getAsts . hie_asts
       pure $ (diags, (\x -> HFR x (refmap x)) <$> hf)
 
@@ -669,10 +652,10 @@ getModSummaryRule = define $ \GetModSummary f -> do
 
 getModIfaceRule :: Rules ()
 getModIfaceRule = define $ \GetModIface f -> do
-    fileOfInterest <- use_ IsFileOfInterest f
-    let useHiFile =
+    -- fileOfInterest <- use_ IsFileOfInterest f
+    let useHiFile = True
           -- Never load interface files for files of interest
-          not fileOfInterest
+          -- not fileOfInterest
     mbHiFile <- if useHiFile then use GetHiFile f else return Nothing
     case mbHiFile of
         Just x ->
