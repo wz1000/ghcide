@@ -21,6 +21,7 @@ import qualified Data.Set as S
 import qualified Data.Map as M
 import           Development.Shake
 import           GHC.Generics                             (Generic)
+import           Data.ByteString (ByteString)
 
 import           GHC
 import Module (InstalledUnitId)
@@ -34,8 +35,18 @@ import Development.IDE.GHC.Compat (RefMap, HieFile(..))
 --   Foo+ means Foo for the dependencies
 --   Foo* means Foo for me and Foo+
 
+data ParsedModuleResult = ParsedModuleResult
+    { pmrModule     :: !ParsedModule
+    , pmrHash       :: !ByteString
+    }
+instance Show ParsedModuleResult where
+    show = show . pmrModule
+
+instance NFData ParsedModuleResult where
+    rnf = rwhnf
+
 -- | The parse tree for the file using GetFileContents
-type instance RuleResult GetParsedModule = ParsedModule
+type instance RuleResult GetParsedModule = ParsedModuleResult
 
 -- | The dependency information produced by following the imports recursively.
 -- This rule will succeed even if there is an error, e.g., a module could not be located,

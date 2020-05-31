@@ -70,6 +70,7 @@ import           TcRnMonad (initIfaceLoad, tcg_th_coreplugins, tcg_src)
 import           TcIface                        (typecheckIface)
 import           TidyPgm
 
+import Data.ByteString (ByteString)
 import Control.Exception.Safe
 import Control.Monad.Extra
 import Control.Monad.Except
@@ -295,13 +296,13 @@ addHieFileToDb hiechan targetPath isBoot srcPath hf = do
     addRefsFromLoaded db targetPath isBoot srcPath time hf
     hPutStrLn stderr $ "Finished indexing .hie file: " ++ targetPath
 
-generateAndWriteHieFile :: HscEnv -> HieWriterChan -> TypecheckedModule -> IO ([FileDiagnostic],Maybe Compat.HieFile)
-generateAndWriteHieFile hscEnv hiechan tcm =
+generateAndWriteHieFile :: HscEnv -> HieWriterChan -> TypecheckedModule -> ByteString -> IO ([FileDiagnostic],Maybe Compat.HieFile)
+generateAndWriteHieFile hscEnv hiechan tcm contents  =
   handleGenerationErrors dflags "extended interface generation" $ do
     case tm_renamed_source tcm of
       Just rnsrc -> do
         hf <- runHsc hscEnv $
-          GHC.mkHieFile mod_summary (fst $ tm_internals_ tcm) rnsrc ""
+          GHC.mkHieFile mod_summary (fst $ tm_internals_ tcm) rnsrc contents
         addHieFileToDb hiechan targetPath isBoot path hf
         pure (Just hf)
       _ ->

@@ -90,7 +90,7 @@ getCompletionsLSP lsp ide
               pm <- useWithStaleFast GetParsedModule npath
               pure (opts, liftA2 (,) compls pm)
           case compls of
-            Just ((cci', _), (pm, mapping)) -> do
+            Just ((cci', _), (ParsedModuleResult pm _, mapping)) -> do
               let !position' = fromCurrentPosition mapping position
               pfix <- maybe (return Nothing) (flip VFS.getCompletionPrefix cnts) position'
               case (pfix, completionContext) of

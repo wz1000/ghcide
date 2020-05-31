@@ -28,8 +28,9 @@ module Development.IDE.Core.Shake(
     shakeRun, shakeRunInternal, shakeRunInternalKill, shakeRunUser,
     shakeProfile,
     use, useWithStale, useNoFile, uses, usesWithStale, useWithStaleFast, delayedAction,
+    queueAction,
     useWithStaleFast', FastResult(..),
-    use_, useNoFile_, uses_,
+    use_, useNoFile_, uses_, BadDependency(..),
     define, defineEarlyCutoff, defineOnDisk, needOnDisk, needOnDisks,
     getDiagnostics, unsafeClearDiagnostics,
     getHiddenDiagnostics,
@@ -235,7 +236,7 @@ lastValueIO s@ShakeExtras{positionMapping,persistentKeys,state} k file = do
           pmap <- readVar persistentKeys
           mv <- runMaybeT $ do
             f <- MaybeT $ pure $ HMap.lookup (Key k) pmap
-            liftIO $ hPutStrLn stderr $ "LOOKUP UP PERSISTENT FOR" ++ show k
+            liftIO $ Logger.logInfo (logger s) $ T.pack $ "LOOKUP UP PERSISTENT FOR" ++ show k
             dv <- MaybeT $ runIdeAction "lastValueIO" s $ f file
             MaybeT $ pure $ fromDynamic dv
           case mv of
@@ -246,14 +247,12 @@ lastValueIO s@ShakeExtras{positionMapping,persistentKeys,state} k file = do
       Just v -> case v of
         Succeeded ver (fromDynamic -> Just v) -> pure (hm, Just (v, mappingForVersion allMappings file ver))
         Stale ver (fromDynamic -> Just v) -> pure (hm, Just (v, mappingForVersion allMappings file ver))
-        _ -> do
-          hPutStrLn stderr "FAILED, LOOKING UP PERSISTENT"
-          readPersistent
+        _ -> readPersistent
 
 -- | Return the most recent, potentially stale, value and a PositionMapping
 -- for the version of that value.
-lastValue :: IdeRule k v => k -> NormalizedFilePath -> Value v -> Action (Maybe (v, PositionMapping))
-lastValue key file v = do
+lastValue :: IdeRule k v => k -> NormalizedFilePath -> Action (Maybe (v, PositionMapping))
+lastValue key file = do
     s <- getShakeExtras
     liftIO $ lastValueIO s key file
 
@@ -884,8 +883,8 @@ uses key files = map (\(A value) -> currentValue value) <$> apply (map (Q . (key
 usesWithStale :: IdeRule k v
     => k -> [NormalizedFilePath] -> Action [Maybe (v, PositionMapping)]
 usesWithStale key files = do
-    values <- map (\(A value) -> value) <$> apply (map (Q . (key,)) files)
-    zipWithM (lastValue key) files values
+    apply (map (Q . (key,)) files)
+    mapM (lastValue key) files
 
 
 withProgress :: (Eq a, Hashable a) => Var (HMap.HashMap a Int) -> a -> Action b -> Action b
