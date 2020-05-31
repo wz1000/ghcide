@@ -32,12 +32,12 @@ mkDocMap
   :: GhcMonad m
   => [ParsedModule]
   -> RefMap
-  -> HomeModInfo
+  -> ModIface
   -> [ModIface]
   -> m DocMap
 mkDocMap sources rm hmi deps =
   do mapM_ (`loadDepModule` Nothing) (reverse deps)
-     modifySession (loadModuleHome hmi)
+     loadDepModule hmi Nothing
      foldrM go M.empty names
   where
     go n map = do

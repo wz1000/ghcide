@@ -456,7 +456,7 @@ readHieFileFromDisk file = runMaybeT $ do
 getDocMapRule :: Rules ()
 getDocMapRule =
     define $ \GetDocMap file -> do
-      hmi <- tmrModInfo <$> use_ TypeCheck file
+      hmi <- hirModIface <$> use_ GetModIface file
       hsc <- hscEnv <$> use_ GhcSession file
       HFR _ rf <- use_ GetHieFile file
 
