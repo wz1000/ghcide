@@ -99,7 +99,6 @@ import           Numeric.Extra
 import Language.Haskell.LSP.Types
 import Control.Monad.IO.Class
 import Control.Monad.Reader
-import Control.Monad.Writer
 import Control.Monad.Trans.Maybe
 import qualified Data.HashPSQ as PQ
 import OpenTelemetry.Eventlog
@@ -110,8 +109,6 @@ import UniqSupply
 import PrelInfo
 
 import HieDb.Types
-
-import System.IO
 
 type HieWriterChan = Chan (HieDb -> IO ())
 
@@ -214,7 +211,7 @@ instance Hashable Key where
 data Value v
     = Succeeded TextDocumentVersion v
     | Stale TextDocumentVersion v
-    | Failed
+    | Failed Bool -- ^ did the persistent read fail
     deriving (Functor, Generic, Show)
 
 instance NFData v => NFData (Value v)
@@ -224,14 +221,13 @@ instance NFData v => NFData (Value v)
 currentValue :: Value v -> Maybe v
 currentValue (Succeeded _ v) = Just v
 currentValue (Stale _ _) = Nothing
-currentValue Failed = Nothing
+currentValue Failed{} = Nothing
 
 -- | Return the most recent, potentially stale, value and a PositionMapping
 -- for the version of that value.
 lastValueIO :: IdeRule k v => ShakeExtras -> k -> NormalizedFilePath -> IO (Maybe (v, PositionMapping))
 lastValueIO s@ShakeExtras{positionMapping,persistentKeys,state} k file = do
   modifyVar state $ \hm -> do
-    allMappings <- readVar positionMapping
     let readPersistent = do
           pmap <- readVar persistentKeys
           mv <- runMaybeT $ do
@@ -240,14 +236,16 @@ lastValueIO s@ShakeExtras{positionMapping,persistentKeys,state} k file = do
             dv <- MaybeT $ runIdeAction "lastValueIO" s $ f file
             MaybeT $ pure $ fromDynamic dv
           case mv of
-            Nothing -> pure (hm,Nothing)
+            Nothing -> pure (HMap.insert (file,Key k) (Failed True) hm,Nothing)
             Just v -> pure (HMap.insert (file,Key k) (Stale Nothing (toDyn v)) hm, Just (v,zeroMapping))
+    allMappings <- readVar positionMapping
     case HMap.lookup (file,Key k) hm of
       Nothing -> readPersistent
       Just v -> case v of
         Succeeded ver (fromDynamic -> Just v) -> pure (hm, Just (v, mappingForVersion allMappings file ver))
         Stale ver (fromDynamic -> Just v) -> pure (hm, Just (v, mappingForVersion allMappings file ver))
-        _ -> readPersistent
+        Failed p | not p -> readPersistent
+        _ -> pure (hm, Nothing)
 
 -- | Return the most recent, potentially stale, value and a PositionMapping
 -- for the version of that value.
@@ -260,7 +258,7 @@ valueVersion :: Value v -> Maybe TextDocumentVersion
 valueVersion = \case
     Succeeded ver _ -> Just ver
     Stale ver _ -> Just ver
-    Failed -> Nothing
+    Failed _ -> Nothing
 
 mappingForVersion
     :: HMap.HashMap NormalizedUri (Map TextDocumentVersion (a, PositionMapping))
@@ -547,7 +545,7 @@ seqValue :: Value v -> b -> b
 seqValue v b = case v of
     Succeeded ver v -> rnf ver `seq` v `seq` b
     Stale ver v -> rnf ver `seq` v `seq` b
-    Failed -> b
+    Failed _ -> b
 
 -- | Open a 'IdeState', should be shut using 'shakeShut'.
 shakeOpen :: IO LSP.LspId
@@ -883,7 +881,7 @@ uses key files = map (\(A value) -> currentValue value) <$> apply (map (Q . (key
 usesWithStale :: IdeRule k v
     => k -> [NormalizedFilePath] -> Action [Maybe (v, PositionMapping)]
 usesWithStale key files = do
-    apply (map (Q . (key,)) files)
+    _ <- apply (map (Q . (key,)) files)
     mapM (lastValue key) files
 
 
@@ -923,11 +921,11 @@ defineEarlyCutoff op = addBuiltinRule noLint noIdentity $ \(Q (key, file)) (old 
                     Nothing -> do
                         staleV <- liftIO $ getValues state key file
                         pure $ case staleV of
-                            Nothing -> (toShakeValue ShakeResult bs, Failed)
+                            Nothing -> (toShakeValue ShakeResult bs, Failed False)
                             Just v -> case v of
                                 Succeeded ver v -> (toShakeValue ShakeStale bs, Stale ver v)
                                 Stale ver v -> (toShakeValue ShakeStale bs, Stale ver v)
-                                Failed -> (toShakeValue ShakeResult bs, Failed)
+                                Failed b -> (toShakeValue ShakeResult bs, Failed b)
                     Just v -> pure (maybe ShakeNoCutoff ShakeResult bs, Succeeded (vfsVersion =<< modTime) v)
                 liftIO $ setValues state key file res
                 updateFileDiagnostics file (Key key) extras $ map (\(_,y,z) -> (y,z)) diags

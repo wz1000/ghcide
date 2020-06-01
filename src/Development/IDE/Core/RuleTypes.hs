@@ -43,7 +43,7 @@ instance Show ParsedModuleResult where
     show = show . pmrModule
 
 instance NFData ParsedModuleResult where
-    rnf = rwhnf
+    rnf (ParsedModuleResult pm hash) = rnf pm `seq` rnf hash
 
 -- | The parse tree for the file using GetFileContents
 type instance RuleResult GetParsedModule = ParsedModuleResult

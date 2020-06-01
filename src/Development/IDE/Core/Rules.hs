@@ -33,11 +33,8 @@ module Development.IDE.Core.Rules(
 import Fingerprint
 
 import Data.Binary
-import Data.Binary hiding (get, put)
-import Data.Bifunctor (second)
 import Util
 import Control.Monad.Extra
-import Control.Applicative
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Maybe
 import Development.IDE.Core.Compile
@@ -81,25 +78,11 @@ import Development.IDE.Core.Service
 import Development.IDE.Core.Shake
 import Development.Shake.Classes hiding (get, put)
 import Control.Monad.Trans.Except (runExceptT)
-import Data.ByteString (ByteString)
 import Control.Concurrent.Async (concurrently)
-import Control.Concurrent.Extra
-import System.Time.Extra
 import Control.Monad.Reader
-import System.Directory ( getModificationTime )
-import qualified System.Directory as Dir
 import Control.Exception
 
-import OccName
 import qualified HieDb
-import Data.Char
-
-import Module (toInstalledUnitId)
-import Packages
-
-import System.IO
-
-import Control.Monad.State
 
 -- | This is useful for rules to convert rules that can only produce errors or
 -- a result into the more general IdeResult type that supports producing
@@ -181,8 +164,6 @@ refsAtPoint :: NormalizedFilePath -> Position -> IdeAction (Maybe [Location])
 refsAtPoint file pos = runMaybeT $ do
     hiedb <- lift $ hiedb <$> askShake
     _ <- lift $ runMaybeT $ reportDbState hiedb
-
-    opts <- liftIO . getIdeOptionsIO =<< ask
 
     (HFR hf rf,mapping) <- useE GetHieFile file
     !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
@@ -295,15 +276,6 @@ getLocatedImportsRule =
         case sequence pkgImports of
             Nothing -> pure (concat diags, Nothing)
             Just pkgImports -> pure (concat diags, Just (moduleImports, Set.fromList $ concat pkgImports))
-
-type RawDepM a = StateT (RawDependencyInformation, IntMap ArtifactsLocation) Action a
-
-execRawDepM :: Monad m => StateT (RawDependencyInformation, IntMap a1) m a2 -> m (RawDependencyInformation, IntMap a1)
-execRawDepM act =
-    execStateT act
-        ( RawDependencyInformation IntMap.empty emptyPathIdMap IntMap.empty
-        , IntMap.empty
-        )
 
 -- | Given a target file path, construct the raw dependency results by following
 -- imports recursively.
