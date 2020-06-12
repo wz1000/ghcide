@@ -101,8 +101,8 @@ useE k = MaybeT . useWithStaleFast k
 useNoFileE :: IdeRule k v => IdeState -> k -> MaybeT IdeAction v
 useNoFileE _ide k = fst <$> useE k emptyFilePath
 
-usesE :: IdeRule k v => k -> [NormalizedFilePath] -> MaybeT Action [v]
-usesE k = MaybeT . fmap sequence . uses k
+usesE :: IdeRule k v => k -> [NormalizedFilePath] -> MaybeT IdeAction [(v,PositionMapping)]
+usesE k = MaybeT . fmap sequence . mapM (useWithStaleFast k)
 
 defineNoFile :: IdeRule k v => (k -> Action v) -> Rules ()
 defineNoFile f = define $ \k file -> do
