@@ -34,6 +34,7 @@ import Development.IDE.Types.Location
 import Development.IDE.Core.OfInterest (kick)
 import Development.IDE.Core.RuleTypes
 import qualified Data.Rope.UTF16 as Rope
+import Development.IDE.Import.DependencyInformation
 
 #ifdef mingw32_HOST_OS
 import Data.Time
@@ -51,6 +52,8 @@ import qualified Development.IDE.Types.Logger as L
 
 import Language.Haskell.LSP.Core
 import Language.Haskell.LSP.VFS
+
+import System.IO
 
 -- | haskell-lsp manages the VFS internally and automatically so we cannot use
 -- the builtin VFS without spawning up an LSP server. To be able to test things
@@ -186,8 +189,14 @@ setBufferModified state absFile contents = do
 
 -- | Note that some buffer for a specific file has been modified but not
 -- with what changes.
-setFileModified :: IdeState -> NormalizedFilePath -> IO ()
-setFileModified state nfp = do
+setFileModified :: IdeState
+                -> Bool -- True indicates that we should also attempt to recompile
+                        -- modules which depended on this file. Currently
+                        -- it is true when saving but not on normal
+                        -- document modification events
+                -> NormalizedFilePath
+                -> IO ()
+setFileModified state prop nfp = do
     VFSHandle{..} <- getIdeGlobalState state
     when (isJust setVirtualFileContents) $
         fail "setSomethingModified can't be called on this type of VFSHandle"
@@ -196,7 +205,20 @@ setFileModified state nfp = do
           liftIO $ progressUpdate KickStarted
           void $ use GetHieFile nfp
           liftIO $ progressUpdate KickCompleted
-    shakeRestart state [da]
+        parents = mkDelayedAction "ParentTC" L.Debug (typecheckParents nfp)
+    shakeRestart state $
+      [da] ++ [parents | prop]
+
+typecheckParents :: NormalizedFilePath -> Action ()
+typecheckParents nfp = do
+    revs <- reverseDependencies nfp <$> useNoFile_ GetModuleGraph
+    liftIO $ do
+      (hPutStrLn stderr $ "GOt Rev deps" ++ show revs)
+        `catch` \(e :: SomeException) -> hPutStrLn stderr (show e)
+      print (length revs)
+    xs <- uses GetModIface revs
+    liftIO $ hPutStrLn stderr $ "Got ifaces" ++ show xs
+    pure ()
 
 -- | Note that some buffer somewhere has been modified, but don't say what.
 --   Only valid if the virtual file system was initialised by LSP, as that

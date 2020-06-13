@@ -262,7 +262,7 @@ loadSession dir = do
     InstallationMismatch{..} ->
         return $ returnWithVersion $ \fp -> return (([renderPackageSetupException compileTime fp GhcVersionMismatch{..}], Nothing),[])
     InstallationChecked compileTime ghcLibCheck -> return $ do
-      ShakeExtras{logger, eventer, restartShakeSession, withIndefiniteProgress, ideNc} <- getShakeExtras
+      ShakeExtras{logger, eventer, restartShakeSession, withIndefiniteProgress, ideNc, session=ideSession} <- getShakeExtras
       IdeOptions{optTesting = IdeTesting optTesting} <- getIdeOptions
 
       -- Create a new HscEnv from a hieYaml root and a set of options
@@ -335,8 +335,7 @@ loadSession dir = do
                 --   existing packages
                 pure (Map.insert hieYaml (newHscEnv, new_deps) m, (newHscEnv, head new_deps', tail new_deps'))
 
-
-      let session :: (Maybe FilePath, NormalizedFilePath, ComponentOptions) -> IO (IdeResult HscEnvEq,[FilePath])
+      let session :: (Maybe FilePath, NormalizedFilePath, ComponentOptions) -> IO ([NormalizedFilePath],(IdeResult HscEnvEq,[FilePath]))
           session (hieYaml, cfp, opts) = do
             (hscEnv, new, old_deps) <- packageSetup (hieYaml, cfp, opts)
             -- Make a map from unit-id to DynFlags, this is used when trying to
@@ -360,9 +359,9 @@ loadSession dir = do
             invalidateShakeCache
             restartShakeSession [kick]
 
-            return (second Map.keys res)
+            return (map fst cs, second Map.keys res)
 
-      let consultCradle :: Maybe FilePath -> FilePath -> IO (IdeResult HscEnvEq, [FilePath])
+      let consultCradle :: Maybe FilePath -> FilePath -> IO ([NormalizedFilePath], (IdeResult HscEnvEq, [FilePath]))
           consultCradle hieYaml cfp = do
              when optTesting $ eventer $ notifyCradleLoaded cfp
              logInfo logger $ T.pack ("Consulting the cradle for " <> show cfp)
@@ -387,11 +386,11 @@ loadSession dir = do
                  let res = (map (renderCradleError ncfp) err, Nothing)
                  modifyVar_ fileToFlags $ \var -> do
                    pure $ Map.insertWith HM.union hieYaml (HM.singleton ncfp (res, dep_info)) var
-                 return (res,[])
+                 return ([ncfp],(res,[]))
 
       -- This caches the mapping from hie.yaml + Mod.hs -> [String]
       -- Returns the Ghc session and the cradle dependencies
-      let sessionOpts :: (Maybe FilePath, FilePath) -> IO (IdeResult HscEnvEq, [FilePath])
+      let sessionOpts :: (Maybe FilePath, FilePath) -> IO ([NormalizedFilePath], (IdeResult HscEnvEq, [FilePath]))
           sessionOpts (hieYaml, file) = do
             v <- fromMaybe HM.empty . Map.lookup hieYaml <$> readVar fileToFlags
             cfp <- canonicalizePath file
@@ -406,25 +405,32 @@ loadSession dir = do
                     -- Keep the same name cache
                     modifyVar_ hscEnvs (return . Map.adjust (\(h, _) -> (h, [])) hieYaml )
                     consultCradle hieYaml cfp
-                  else return (opts, Map.keys old_di)
+                  else return ([], (opts, Map.keys old_di))
               Nothing -> consultCradle hieYaml cfp
 
       -- The main function which gets options for a file. We only want one of these running
       -- at a time. Therefore the IORef contains the currently running cradle, if we try
       -- to get some more options then we wait for the currently running action to finish
       -- before attempting to do so.
-      let getOptions :: FilePath -> IO (IdeResult HscEnvEq, [FilePath])
+      let getOptions :: FilePath -> IO ([NormalizedFilePath],(IdeResult HscEnvEq, [FilePath]))
           getOptions file = do
               hieYaml <- cradleLoc file
               sessionOpts (hieYaml, file) `catch` \e ->
-                  return (([renderPackageSetupException compileTime file e], Nothing),[])
+                  return ([],(([renderPackageSetupException compileTime file e], Nothing),[]))
 
       returnWithVersion $ \file -> do
-        liftIO $ join $ mask_ $ modifyVar runningCradle $ \as -> do
+        (cs, opts) <- liftIO $ join $ mask_ $ modifyVar runningCradle $ \as -> do
           -- If the cradle is not finished, then wait for it to finish.
           void $ wait as
           as <- async $ getOptions file
-          return (as, wait as)
+          return $ (fmap snd as, wait as)
+        unless (null cs) $
+          void $ shakeEnqueueSession ideSession $ mkDelayedAction "InitialLoad" Info $ void $ do
+            cfps' <- liftIO $ filterM (IO.doesFileExist . fromNormalizedFilePath) cs
+            mmt <- uses GetModificationTime cfps'
+            let cs_exist = catMaybes (zipWith (<$) cfps' mmt)
+            uses GetModIface cs_exist
+        pure opts
 
 -- | Create a mapping from FilePaths to HscEnvEqs
 newComponentCache
