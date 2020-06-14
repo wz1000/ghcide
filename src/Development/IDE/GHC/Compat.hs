@@ -21,6 +21,8 @@ module Development.IDE.GHC.Compat(
     dontWriteHieFiles,
 #if !MIN_GHC_API_VERSION(8,8,0)
     ml_hie_file,
+    module Development.IDE.GHC.HieTypes,
+    module Development.IDE.GHC.HieUtils,
 #endif
     hPutStringBuffer,
     includePathsGlobal,
@@ -48,8 +50,6 @@ module Development.IDE.GHC.Compat(
     module HieTypes,
     module HieUtils,
 #endif
-    generateReferencesMap,
-    getAsts
     ) where
 
 import StringBuffer
