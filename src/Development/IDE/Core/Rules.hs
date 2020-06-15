@@ -494,9 +494,10 @@ typeCheckRule = define $ \TypeCheck file -> do
 
 getModuleGraphRule :: Rules ()
 getModuleGraphRule = defineNoFile $ \GetModuleGraph -> do
+  alwaysRerun
   fs <- knownFiles
   rawDepInfo <- rawDependencyInformation (HS.toList fs)
-  pure (processDependencyInformation rawDepInfo)
+  pure $ processDependencyInformation rawDepInfo
 
 
 data GenerateInterfaceFiles
