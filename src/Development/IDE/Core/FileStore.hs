@@ -53,6 +53,8 @@ import qualified Development.IDE.Types.Logger as L
 import Language.Haskell.LSP.Core
 import Language.Haskell.LSP.VFS
 
+import System.IO
+
 -- | haskell-lsp manages the VFS internally and automatically so we cannot use
 -- the builtin VFS without spawning up an LSP server. To be able to test things
 -- like `setBufferModified` we abstract over the VFS implementation.
@@ -208,8 +210,13 @@ setFileModified state prop nfp = do
 typecheckParents :: NormalizedFilePath -> Action ()
 typecheckParents nfp = do
     revs <- reverseDependencies nfp <$> useNoFile_ GetModuleGraph
-    liftIO $ print (length revs)
-    void $ uses GetModIface revs
+    liftIO $ do
+      (hPutStrLn stderr $ "GOt Rev deps" ++ show revs)
+        `catch` \(e :: SomeException) -> hPutStrLn stderr (show e)
+      print (length revs)
+    xs <- uses GetModIface revs
+    liftIO $ hPutStrLn stderr $ "Got ifaces" ++ show xs
+    pure ()
 
 -- | Note that some buffer somewhere has been modified, but don't say what.
 --   Only valid if the virtual file system was initialised by LSP, as that
