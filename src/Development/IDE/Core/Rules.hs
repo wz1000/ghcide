@@ -685,12 +685,12 @@ getModSummaryRule = defineEarlyCutoff $ \GetModSummary f -> do
 getModIfaceRule :: Rules ()
 getModIfaceRule = define $ \GetModIface f -> do
     fileOfInterest <- use_ IsFileOfInterest f
-    case fileOfInterest of
-        True -> do
+    if fileOfInterest
+        then do
             -- Never load from disk for files of interest
             tmr <- use TypeCheck f
             return ([], extractHiFileResult tmr)
-        False ->
+        else
             ([],) <$> use GetModIfaceFromDisk f
 
 regenerateHiFile :: NormalizedFilePath -> Action ([FileDiagnostic], Maybe HiFileResult)
