@@ -173,9 +173,10 @@ executable ghcide-test-preprocessor
     build-depends:
         base == 4.*
 
-executable benchHist
+
+Benchmark benchHist
+    type:       exitcode-stdio-1.0
     default-language: Haskell2010
-    buildable: True
     ghc-options: -Wall -Wno-name-shadowing -threaded
     main-is: bench/Hist/Main.hs
     default-extensions:
