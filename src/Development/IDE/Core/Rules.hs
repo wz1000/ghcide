@@ -616,7 +616,7 @@ getModIfaceFromDiskRule = defineEarlyCutoff $ \GetModIfaceFromDisk f -> do
   (diags_session, mb_session) <- ghcSessionDepsDefinition f
   case mb_session of
       Nothing -> return (Nothing, (diags_session, Nothing))
-      Just (hscEnv -> session) -> do
+      Just session -> do
         let hiFile = toNormalizedFilePath'
                     $ case ms_hsc_src ms of
                         HsBootFile -> addBootSuffix (ml_hi_file $ ms_location ms)
@@ -627,7 +627,7 @@ getModIfaceFromDiskRule = defineEarlyCutoff $ \GetModIfaceFromDisk f -> do
                 Nothing -> SourceModified
                 Just x -> if modificationTime x >= modificationTime modVersion
                             then SourceUnmodified else SourceModified
-        r <- loadInterface session ms sourceModified (regenerateHiFile f)
+        r <- loadInterface (hscEnv session) ms sourceModified (regenerateHiFile session f)
         case r of
             (diags, Just x) -> do
                 let fp = fingerprintToBS (getModuleHash (hirModIface x))
@@ -674,11 +674,8 @@ getModIfaceRule = define $ \GetModIface f -> do
         else
             ([],) <$> use GetModIfaceFromDisk f
 
-regenerateHiFile :: NormalizedFilePath -> Action ([FileDiagnostic], Maybe HiFileResult)
-regenerateHiFile f = do
-    -- Invoke typechecking directly to update it without incurring a dependency
-    -- on the parsed module and the typecheck rules
-    sess <- use_ GhcSession f
+regenerateHiFile :: HscEnvEq -> NormalizedFilePath -> Action ([FileDiagnostic], Maybe HiFileResult)
+regenerateHiFile sess f = do
     let hsc = hscEnv sess
         -- After parsing the module remove all package imports referring to
         -- these packages as we have already dealt with what they map to.
@@ -696,16 +693,12 @@ regenerateHiFile f = do
     case mb_pm of
         Nothing -> return (diags, Nothing)
         Just pm -> do
-            -- We want GhcSessionDeps cache objects only for files of interest
-            -- As that's no the case here, call the implementation directly
-            (diags, mb_hsc) <- ghcSessionDepsDefinition f
-            case mb_hsc of
-                Nothing -> return (diags, Nothing)
-                Just hsc -> do
-                    (diags', tmr) <- typeCheckRuleDefinition (hscEnv hsc) pm DoGenerateInterfaceFiles
-                    -- Bang pattern is important to avoid leaking 'tmr'
-                    let !res = extractHiFileResult tmr
-                    return (diags <> diags', res)
+            -- Invoke typechecking directly to update it without incurring a dependency
+            -- on the parsed module and the typecheck rules
+            (diags', tmr) <- typeCheckRuleDefinition hsc pm DoGenerateInterfaceFiles
+            -- Bang pattern is important to avoid leaking 'tmr'
+            let !res = extractHiFileResult tmr
+            return (diags <> diags', res)
 
 extractHiFileResult :: Maybe TcModuleResult -> Maybe HiFileResult
 extractHiFileResult Nothing = Nothing
