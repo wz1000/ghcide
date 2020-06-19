@@ -29,7 +29,6 @@ module Development.IDE.Core.Shake(
     shakeOpen, shakeShut,
     shakeRestart,
     shakeEnqueue,
-    shakeRunInternal, shakeRunUser,
     shakeProfile,
     use, useNoFile, uses, useWithStaleFast, useWithStaleFast', delayedAction,
     FastResult(..),
@@ -55,7 +54,7 @@ module Development.IDE.Core.Shake(
     deleteValue,
     OnDiskRule(..),
     WithProgressFunc, WithIndefiniteProgressFunc,
-    delay, DelayedAction, mkDelayedAction,
+    DelayedAction, mkDelayedAction,
     IdeAction(..), runIdeAction
     ) where
 
@@ -497,26 +496,6 @@ delayedAction :: DelayedAction a -> IdeAction (IO a)
 delayedAction a = do
   sq <- session <$> ask
   liftIO $ shakeEnqueueSession sq a
-
--- | A varient of delayedAction for the Action monad
--- The supplied action *will* be run but at least not until the current action has finished.
-delay :: String -> Action () -> Action ()
-delay herald a = do
-    ShakeExtras{session} <- getShakeExtras
-    let da = mkDelayedAction herald Info a
-    -- Do not wait for the action to return
-    void $ liftIO $ shakeEnqueueSession session da
-
--- | Running an action which DIRECTLY corresponds to something a user did,
--- for example computing hover information.
-shakeRunUser :: IdeState -> [DelayedAction a] -> IO ([IO a])
-shakeRunUser ide as = mapM (shakeEnqueue ide) as
-
--- | Running an action which is INTERNAL to shake, for example, a file has
--- been modified, basically any use of shakeRun which is not blocking (ie
--- which is not called via runAction).
-shakeRunInternal :: IdeState -> [DelayedAction a] -> IO ()
-shakeRunInternal ide as = void $ shakeRunUser ide as
 
 -- | Restart the current 'ShakeSession' with the given system actions.
 --   Any computation running in the current session will be aborted,
