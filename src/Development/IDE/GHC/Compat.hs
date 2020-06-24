@@ -100,16 +100,15 @@ import HieUtils
 #else
 
 #if MIN_GHC_API_VERSION(8,6,0)
-<<<<<<< HEAD
 import BinIface
 import Data.IORef
 import IfaceEnv
+import Development.IDE.GHC.HieUtils
+import Development.IDE.GHC.HieTypes
 #else
 import System.IO.Error
-=======
 import Development.IDE.GHC.HieTypes
 import Development.IDE.GHC.HieUtils
->>>>>>> f9a6375... Backport HIE files support to 8.6
 #endif
 
 import Control.Exception (catch)
