@@ -845,7 +845,7 @@ usesWithStale key files = do
 withSpanAction_ :: Show k => k -> NormalizedFilePath -> Action a -> Action a
 withSpanAction_ key file action = actionBracket
     ( do
-         span <- beginSpan (show key)
+         span <- beginSpan (BS.pack $ show key)
          setTag span "File" (BS.pack $ fromNormalizedFilePath $ file)
          return span
     )
