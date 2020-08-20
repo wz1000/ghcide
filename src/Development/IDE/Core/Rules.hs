@@ -303,7 +303,7 @@ getLocatedImportsRule =
         targets <- useNoFile_ GetKnownFiles
         let imports = [(False, imp) | imp <- ms_textual_imps ms] ++ [(True, imp) | imp <- ms_srcimps ms]
         env_eq <- use_ GhcSession file
-        let env = hscEnv env_eq
+        let env = hscEnvWithImportPaths env_eq
         let import_dirs = deps env_eq
         let dflags = addRelativeImport file (moduleName $ ms_mod ms) $ hsc_dflags env
         opt <- getIdeOptions
