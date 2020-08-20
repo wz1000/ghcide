@@ -16,7 +16,6 @@ module Development.IDE.LSP.HoverDefinition
 
 import           Development.IDE.Core.Rules
 import           Development.IDE.Core.Shake
-import           Development.IDE.Core.Tracing
 import           Development.IDE.LSP.Server
 import           Development.IDE.Types.Location
 import           Development.IDE.Types.Logger
@@ -25,7 +24,6 @@ import           Language.Haskell.LSP.Messages
 import           Language.Haskell.LSP.Types
 
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
 
 gotoDefinition :: IdeState -> TextDocumentPositionParams -> IO (Either ResponseError LocationResponseParams)
 hover          :: IdeState -> TextDocumentPositionParams -> IO (Either ResponseError (Maybe Hover))
@@ -59,7 +57,7 @@ request
   -> IdeState
   -> TextDocumentPositionParams
   -> IO (Either ResponseError b)
-request label getResults notFound found ide (TextDocumentPositionParams (TextDocumentIdentifier uri) pos _) = otTraced ("Request:" <> TE.encodeUtf8 label) $ do
+request label getResults notFound found ide (TextDocumentPositionParams (TextDocumentIdentifier uri) pos _) = do
     mbResult <- case uriToFilePath' uri of
         Just path -> logAndRunRequest label getResults ide pos path
         Nothing   -> pure Nothing
