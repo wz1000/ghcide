@@ -2379,6 +2379,25 @@ thTests =
         _ <- createDoc "B.hs" "haskell" sourceB
         return ()
     , thReloadingTest `xfail` "expect broken (#672)"
+    -- Regression test for https://github.com/digital-asset/ghcide/issues/614
+    , testSessionWait "findsTHIdentifiers" $ do
+        let sourceA =
+              T.unlines
+                [ "{-# LANGUAGE TemplateHaskell #-}"
+                , "module A (a) where"
+                , "a = [| glorifiedID |]"
+                , "glorifiedID :: a -> a"
+                , "glorifiedID = id" ]
+        let sourceB =
+              T.unlines
+                [ "{-# OPTIONS_GHC -Wall #-}"
+                , "{-# LANGUAGE TemplateHaskell #-}"
+                , "module B where"
+                , "import A"
+                , "main = $a (putStrLn \"success!\")"]
+        _ <- createDoc "A.hs" "haskell" sourceA
+        _ <- createDoc "B.hs" "haskell" sourceB
+        expectDiagnostics [ ( "B.hs", [(DsWarning, (4, 0), "Top-level binding with no type signature: main :: IO ()")] ) ]
     ]
 
 -- | test that TH is reevaluated on typecheck
