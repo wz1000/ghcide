@@ -87,6 +87,11 @@ import Exception (ExceptionMonad)
 import TcEnv (tcLookup)
 import Data.Time (UTCTime)
 
+import           Avail     (availsToNameSet)
+import           ConLike   (ConLike (PatSynCon))
+import           InstEnv   (updateClsInstDFun)
+import           PatSyn    (PatSyn, updatePatSynIds)
+import           TcRnTypes (TcGblEnv (TcGblEnv, tcg_exports, tcg_fam_insts, tcg_insts, tcg_keep, tcg_patsyns, tcg_tcs, tcg_type_env))
 
 -- | Given a string buffer, return the string (after preprocessing) and the 'ParsedModule'.
 parseModule
@@ -133,9 +138,10 @@ typecheckModule (IdeDefer defer) hsc pm = do
         (warnings, tcm) <- withWarnings "typecheck" $ \tweak ->
             GHC.typecheckModule $ enableTopLevelWarnings
                                 $ demoteIfDefer pm{pm_mod_summary = tweak modSummary'}
+        tcm' <- liftIO $ fixDetailsForTH tcm
         let errorPipeline = unDefer . hideDiag dflags
             diags = map errorPipeline warnings
-        tcm2 <- mkTcModuleResult tcm (any fst diags)
+        tcm2 <- mkTcModuleResult tcm' (any fst diags)
         return (map snd diags, tcm2)
     where
         demoteIfDefer = if defer then demoteTypeErrorsToWarnings else id
@@ -687,3 +693,73 @@ lookupName mod name = withSession $ \hsc_env -> liftIO $ do
             ATcId{tct_id=id} -> return (AnId id)
             _ -> panic "tcRnLookupName'"
     return res
+
+-- | This function recalculates the fields md_types and md_insts in the ModDetails.
+-- It duplicates logic from GHC mkBootModDetailsTc to keep more ids,
+-- because ghc drops ids in tcg_keep, which matters because TH identifiers
+-- might be in there.  See the original function for more comments.
+fixDetailsForTH :: TypecheckedModule -> IO TypecheckedModule
+fixDetailsForTH tcm = do
+   keep_ids <- readIORef keep_ids_ptr
+   let
+    keep_it id | isWiredInName id_name           = False
+                 -- See Note [Drop wired-in things]
+               | isExportedId id                 = True
+               | id_name `elemNameSet` exp_names = True
+               | id_name `elemNameSet` keep_ids  = True -- This is the line added in comparison to the original function.
+               | otherwise                       = False
+               where
+                 id_name = idName id
+    final_ids = [ globaliseAndTidyBootId id
+                | id <- typeEnvIds type_env
+                , keep_it id ]
+    final_tcs  = filterOut (isWiredInName . getName) tcs
+    type_env1  = typeEnvFromEntities final_ids final_tcs fam_insts
+    insts'     = mkFinalClsInsts type_env1 insts
+    pat_syns'  = mkFinalPatSyns  type_env1 pat_syns
+    type_env'  = extendTypeEnvWithPatSyns pat_syns' type_env1
+    fixedDetails = details {
+                         md_types         = type_env'
+                       , md_insts         = insts'
+                       }
+   pure $ tcm { tm_internals_ = (tc_gbl_env, fixedDetails) }
+ where
+    (tc_gbl_env, details) = tm_internals_ tcm
+    TcGblEnv{ tcg_exports          = exports,
+              tcg_type_env         = type_env,
+              tcg_tcs              = tcs,
+              tcg_patsyns          = pat_syns,
+              tcg_insts            = insts,
+              tcg_fam_insts        = fam_insts,
+              tcg_keep             = keep_ids_ptr
+            } = tc_gbl_env
+    exp_names = availsToNameSet exports
+
+-- Functions from here are only pasted from ghc TidyPgm.hs
+
+mkFinalClsInsts :: TypeEnv -> [ClsInst] -> [ClsInst]
+mkFinalClsInsts env = map (updateClsInstDFun (lookupFinalId env))
+
+mkFinalPatSyns :: TypeEnv -> [PatSyn] -> [PatSyn]
+mkFinalPatSyns env = map (updatePatSynIds (lookupFinalId env))
+
+lookupFinalId :: TypeEnv -> Id -> Id
+lookupFinalId type_env id
+  = case lookupTypeEnv type_env (idName id) of
+      Just (AnId id') -> id'
+      _ -> pprPanic "lookup_final_id" (ppr id)
+
+extendTypeEnvWithPatSyns :: [PatSyn] -> TypeEnv -> TypeEnv
+extendTypeEnvWithPatSyns tidy_patsyns type_env
+  = extendTypeEnvList type_env [AConLike (PatSynCon ps) | ps <- tidy_patsyns ]
+
+globaliseAndTidyBootId :: Id -> Id
+-- For a LocalId with an External Name,
+-- makes it into a GlobalId
+--     * unchanged Name (might be Internal or External)
+--     * unchanged details
+--     * VanillaIdInfo (makes a conservative assumption about Caf-hood and arity)
+--     * BootUnfolding (see Note [Inlining and hs-boot files] in ToIface)
+globaliseAndTidyBootId id
+  = globaliseId id `setIdType`      tidyTopType (idType id)
+                   `setIdUnfolding` BootUnfolding
