@@ -24,6 +24,7 @@ module Development.IDE.Core.Rules(
     getAtPoint,
     getDefinition,
     getTypeDefinition,
+    highlightAtPoint,
     getDependencies,
     getParsedModule,
     generateCore,
@@ -39,7 +40,7 @@ import Control.Monad.Trans.Maybe
 import Development.IDE.Core.Compile
 import Development.IDE.Core.OfInterest
 import Development.IDE.Types.Options
-import Development.IDE.Spans.Calculate
+import Development.IDE.Spans.Documentation
 import Development.IDE.Import.DependencyInformation
 import Development.IDE.Import.FindImports
 import           Development.IDE.Core.FileExists
@@ -57,13 +58,14 @@ import qualified Data.IntMap.Strict as IntMap
 import Data.IntMap.Strict (IntMap)
 import Data.List
 import qualified Data.Set                                 as Set
+import qualified Data.HashSet                             as HS
 import qualified Data.Text                                as T
 import           Development.IDE.GHC.Error
 import           Development.Shake                        hiding (Diagnostic)
 import Development.IDE.Core.RuleTypes
-import Development.IDE.Spans.Type
 import qualified Data.ByteString.Char8 as BS
 import Development.IDE.Core.PositionMapping
+import           Language.Haskell.LSP.Types (DocumentHighlight (..))
 
 import qualified GHC.LanguageExtensions as LangExt
 import HscTypes
@@ -87,6 +89,7 @@ import Control.Monad.State
 import FastString (FastString(uniq))
 import qualified HeaderInfo as Hdr
 import Data.Time (UTCTime(..))
+import Data.Hashable
 
 -- | This is useful for rules to convert rules that can only produce errors or
 -- a result into the more general IdeResult type that supports producing
@@ -129,26 +132,35 @@ getAtPoint :: NormalizedFilePath -> Position -> IdeAction (Maybe (Maybe Range, [
 getAtPoint file pos = fmap join $ runMaybeT $ do
   ide <- ask
   opts <- liftIO $ getIdeOptionsIO ide
-  (spans, mapping) <- useE  GetSpanInfo file
+
+  (HFR hf _, mapping) <- useE GetHieFile file
+  PDocMap dm <- lift $ maybe (PDocMap mempty) fst <$> (runMaybeT $ useE GetDocMap file)
+
   !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
-  return $ AtPoint.atPoint opts spans pos'
+  return $ AtPoint.atPoint opts hf dm pos'
 
 -- | Goto Definition.
 getDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe Location)
 getDefinition file pos = runMaybeT $ do
     ide <- ask
     opts <- liftIO $ getIdeOptionsIO ide
-    (spans,mapping) <- useE GetSpanInfo file
+    (HFR hf _, mapping) <- useE GetHieFile file
     !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
-    AtPoint.gotoDefinition (getHieFile ide file) opts (spansExprs spans) pos'
+    AtPoint.gotoDefinition (getHieFile ide file) opts hf pos'
 
 getTypeDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe [Location])
 getTypeDefinition file pos = runMaybeT $ do
     ide <- ask
     opts <- liftIO $ getIdeOptionsIO ide
-    (spans,mapping) <- useE GetSpanInfo file
+    (HFR hf _, mapping) <- useE GetHieFile file
     !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
-    AtPoint.gotoTypeDefinition (getHieFile ide file) opts (spansExprs spans) pos'
+    AtPoint.gotoTypeDefinition (getHieFile ide file) opts hf pos'
+
+highlightAtPoint :: NormalizedFilePath -> Position -> IdeAction (Maybe [DocumentHighlight])
+highlightAtPoint file pos = runMaybeT $ do
+    (HFR hf rf,mapping) <- useE GetHieFile file
+    !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
+    AtPoint.documentHighlight hf rf pos'
 
 getHieFile
   :: ShakeExtras
@@ -191,7 +203,6 @@ getHomeHieFile f = do
       ncu <- mkUpdater
       liftIO $ loadHieFile ncu hie_f
 
-
 getPackageHieFile :: ShakeExtras
                   -> Module             -- ^ Package Module to load .hie file for
                   -> NormalizedFilePath -- ^ Path of home module importing the package module
@@ -231,6 +242,12 @@ priorityGenerateCore = Priority (-1)
 priorityFilesOfInterest :: Priority
 priorityFilesOfInterest = Priority (-2)
 
+-- | IMPORTANT FOR HLINT INTEGRATION:
+-- We currently parse the module both with and without Opt_Haddock, and
+-- return the one with Haddocks if it -- succeeds. However, this may not work
+-- for hlint, and we might need to save the one without haddocks too.
+-- See https://github.com/digital-asset/ghcide/pull/350#discussion_r370878197
+-- and https://github.com/mpickering/ghcide/pull/22#issuecomment-625070490
 getParsedModuleRule :: Rules ()
 getParsedModuleRule = defineEarlyCutoff $ \GetParsedModule file -> do
     sess <- use_ GhcSession file
@@ -249,18 +266,26 @@ getParsedModuleRule = defineEarlyCutoff $ \GetParsedModule file -> do
         then
             liftIO mainParse
         else do
-            let haddockParse = do
-                    (_, (!diagsHaddock, _)) <-
-                        getParsedModuleDefinition (withOptHaddock hsc) opt comp_pkgs file modTime contents
-                    return diagsHaddock
+            let haddockParse = getParsedModuleDefinition (withOptHaddock hsc) opt comp_pkgs file modTime contents
 
-            ((fingerPrint, (diags, res)), diagsHaddock) <-
-                -- parse twice, with and without Haddocks, concurrently
-                -- we want warnings if parsing with Haddock fails
-                -- but if we parse with Haddock we lose annotations
-                liftIO $ concurrently mainParse haddockParse
+            -- parse twice, with and without Haddocks, concurrently
+            -- we cannot ignore Haddock parse errors because files of
+            -- non-interest are always parsed with Haddocks
+            -- If we can parse Haddocks, might as well use them
+            --
+            -- HLINT INTEGRATION: might need to save the other parsed module too
+            ((fp,(diags,res)),(fph,(diagsh,resh))) <- liftIO $ concurrently mainParse haddockParse
 
-            return (fingerPrint, (mergeParseErrorsHaddock diags diagsHaddock, res))
+            -- Merge haddock and regular diagnostics so we can always report haddock
+            -- parse errors
+            let diagsM = mergeParseErrorsHaddock diags diagsh
+            case resh of
+              Just _ -> pure (fph, (diagsM, resh))
+              -- If we fail to parse haddocks, report the haddock diagnostics as well and
+              -- return the non-haddock parse.
+              -- This seems to be the correct behaviour because the Haddock flag is added
+              -- by us and not the user, so our IDE shouldn't stop working because of it.
+              Nothing  -> pure (fp, (diagsM, res))
 
 
 withOptHaddock :: HscEnv -> HscEnv
@@ -442,7 +467,7 @@ reportImportCyclesRule =
             | f `elem` fs = Just (imp, fs)
           cycleErrorInFile _ _ = Nothing
           toDiag imp mods = (fp , ShowDiag , ) $ Diagnostic
-            { _range = (_range :: Location -> Range) loc
+            { _range = rng
             , _severity = Just DsError
             , _source = Just "Import cycle detection"
             , _message = "Cyclic module dependency between " <> showCycle mods
@@ -450,8 +475,8 @@ reportImportCyclesRule =
             , _relatedInformation = Nothing
             , _tags = Nothing
             }
-            where loc = srcSpanToLocation (getLoc imp)
-                  fp = toNormalizedFilePath' $ srcSpanToFilename (getLoc imp)
+            where rng = fromMaybe noRange $ srcSpanToRange (getLoc imp)
+                  fp = toNormalizedFilePath' $ fromMaybe noFilePath $ srcSpanToFilename (getLoc imp)
           getModuleName file = do
            ms <- use_ GetModSummaryWithoutTimestamps file
            pure (moduleNameString . moduleName . ms_mod $ ms)
@@ -469,27 +494,41 @@ getDependenciesRule =
         let mbFingerprints = map (fingerprintString . fromNormalizedFilePath) allFiles <$ optShakeFiles opts
         return (fingerprintToBS . fingerprintFingerprints <$> mbFingerprints, ([], transitiveDeps depInfo file))
 
--- Source SpanInfo is used by AtPoint and Goto Definition.
-getSpanInfoRule :: Rules ()
-getSpanInfoRule =
-    define $ \GetSpanInfo file -> do
-        tc <- use_ TypeCheck file
-        packageState <- hscEnv <$> use_ GhcSessionDeps file
+getHieFileRule :: Rules ()
+getHieFileRule =
+    define $ \GetHieFile f -> do
+      tcm <- use_ TypeCheck f
+      hf <- case tmrHieFile tcm of
+        Just hf -> pure ([],Just hf)
+        Nothing -> do
+          hsc  <- hscEnv <$> use_ GhcSession f
+          liftIO $ generateAndWriteHieFile hsc (tmrModule tcm)
+      let refmap = generateReferencesMap . getAsts . hie_asts
+      pure $ fmap (\x -> HFR x $ refmap x) <$> hf
+
+
+getDocMapRule :: Rules ()
+getDocMapRule =
+    define $ \GetDocMap file -> do
+      hmi <- hirModIface <$> use_ GetModIface file
+      hsc <- hscEnv <$> use_ GhcSessionDeps file
+      HFR _ rf <- use_ GetHieFile file
+
+      deps <- maybe (TransitiveDependencies [] [] []) fst <$> useWithStale GetDependencies file
+      let tdeps = transitiveModuleDeps deps
 
 -- When possible, rely on the haddocks embedded in our interface files
 -- This creates problems on ghc-lib, see comment on 'getDocumentationTryGhc'
 #if MIN_GHC_API_VERSION(8,6,0) && !defined(GHC_LIB)
-        let parsedDeps = []
+      let parsedDeps = []
 #else
-        deps <- maybe (TransitiveDependencies [] [] []) fst <$> useWithStale GetDependencies file
-        let tdeps = transitiveModuleDeps deps
-        parsedDeps <- mapMaybe (fmap fst) <$> usesWithStale GetParsedModule tdeps
+      parsedDeps <- uses_ GetParsedModule tdeps
 #endif
 
-        (fileImports, _) <- use_ GetLocatedImports file
-        let imports = second (fmap artifactFilePath) <$> fileImports
-        x <- liftIO $ getSrcSpanInfos packageState imports tc parsedDeps
-        return ([], Just x)
+      ifaces <- uses_ GetModIface tdeps
+
+      docMap <- liftIO $ evalGhcEnv hsc $ mkDocMap parsedDeps rf hmi (map hirModIface ifaces)
+      return ([],Just $ PDocMap docMap)
 
 -- Typechecks a module.
 typeCheckRule :: Rules ()
@@ -499,6 +538,25 @@ typeCheckRule = define $ \TypeCheck file -> do
     -- do not generate interface files as this rule is called
     -- for files of interest on every keystroke
     typeCheckRuleDefinition hsc pm SkipGenerationOfInterfaceFiles
+
+data GetKnownFiles = GetKnownFiles
+  deriving (Show, Generic, Eq, Ord)
+instance Hashable GetKnownFiles
+instance NFData   GetKnownFiles
+instance Binary   GetKnownFiles
+type instance RuleResult GetKnownFiles = HS.HashSet NormalizedFilePath
+
+knownFilesRule :: Rules ()
+knownFilesRule = defineEarlyCutOffNoFile $ \GetKnownFiles -> do
+  alwaysRerun
+  fs <- knownFiles
+  pure (BS.pack (show $ hash fs), unhashed fs)
+
+getModuleGraphRule :: Rules ()
+getModuleGraphRule = defineNoFile $ \GetModuleGraph -> do
+  fs <- useNoFile_ GetKnownFiles
+  rawDepInfo <- rawDependencyInformation (HS.toList fs)
+  pure $ processDependencyInformation rawDepInfo
 
 data GenerateInterfaceFiles
     = DoGenerateInterfaceFiles
@@ -521,10 +579,15 @@ typeCheckRuleDefinition hsc pm generateArtifacts = do
   addUsageDependencies $ liftIO $ do
     res <- typecheckModule defer hsc pm
     case res of
-      (diags, Just (hsc,tcm)) | DoGenerateInterfaceFiles <- generateArtifacts -> do
-        diagsHie <- generateAndWriteHieFile hsc (tmrModule tcm)
-        diagsHi  <- generateAndWriteHiFile hsc tcm
-        return (diags <> diagsHi <> diagsHie, Just tcm)
+      (diags, Just (hsc,tcm))
+        | DoGenerateInterfaceFiles <- generateArtifacts
+        -> do
+        -- Don't save interface files for modules that compiled due to defering
+        -- type errors, as we won't get proper diagnostics if we load these from
+        -- disk
+        (diagsHie,hf) <- generateAndWriteHieFile hsc (tmrModule tcm)
+        diagsHi  <- if not $ tmrDeferedError tcm then writeHiFile hsc tcm else pure mempty
+        return (diags <> diagsHi <> diagsHie, Just tcm{tmrHieFile=hf})
       (diags, res) ->
         return (diags, snd <$> res)
  where
@@ -662,9 +725,7 @@ isHiFileStableRule :: Rules ()
 isHiFileStableRule = define $ \IsHiFileStable f -> do
     ms <- use_ GetModSummaryWithoutTimestamps f
     let hiFile = toNormalizedFilePath'
-                $ case ms_hsc_src ms of
-                    HsBootFile -> addBootSuffix (ml_hi_file $ ms_location ms)
-                    _ -> ml_hi_file $ ms_location ms
+                $ ml_hi_file $ ms_location ms
     mbHiVersion <- use  GetModificationTime_{missingFileDiagnostics=False} hiFile
     modVersion  <- use_ GetModificationTime f
     sourceModified <- case mbHiVersion of
@@ -793,7 +854,8 @@ mainRule = do
     reportImportCyclesRule
     getDependenciesRule
     typeCheckRule
-    getSpanInfoRule
+    getHieFileRule
+    getDocMapRule
     generateCoreRule
     generateByteCodeRule
     loadGhcSession
@@ -802,6 +864,8 @@ mainRule = do
     isFileOfInterestRule
     getModSummaryRule
     isHiFileStableRule
+    getModuleGraphRule
+    knownFilesRule
 
 -- | Given the path to a module src file, this rule returns True if the
 -- corresponding `.hi` file is stable, that is, if it is newer

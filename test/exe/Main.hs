@@ -87,6 +87,7 @@ main = do
     , nonLspCommandLine
     , benchmarkTests
     , ifaceTests
+    , bootTests
     ]
 
 initializeResponseTests :: TestTree
@@ -110,7 +111,7 @@ initializeResponseTests = withResource acquire release tests where
     -- for now
     , chk "NO goto implementation"  _implementationProvider (Just $ GotoOptionsStatic True)
     , chk "NO find references"          _referencesProvider  Nothing
-    , chk "NO doc highlight"     _documentHighlightProvider  Nothing
+    , chk "   doc highlight"     _documentHighlightProvider  (Just True)
     , chk "   doc symbol"           _documentSymbolProvider  (Just True)
     , chk "NO workspace symbol"    _workspaceSymbolProvider  Nothing
     , chk "   code action"             _codeActionProvider $ Just $ CodeActionOptionsStatic True
@@ -191,8 +192,7 @@ diagnosticTests = testGroup "diagnostics"
             , "foo :: Int -> Int -> Int"
             , "foo a b = a + ab"
             , "bar :: Int -> Int -> Int"
-            , "bar a b = cd + b"
-            ]
+            , "bar a b = cd + b" ]
       _ <- createDoc "Testing.hs" "haskell" content
       expectDiagnostics
         [ ( "Testing.hs"
@@ -2032,7 +2032,7 @@ findDefinitionAndHoverTests = let
   lstL43 = Position 47 12  ;  litL   = [ExpectHoverText ["[8391 :: Int, 6268]"]]
   outL45 = Position 49  3  ;  outSig = [ExpectHoverText ["outer", "Bool"], mkR 46 0 46 5]
   innL48 = Position 52  5  ;  innSig = [ExpectHoverText ["inner", "Char"], mkR 49 2 49 7]
-  cccL17 = Position 17 11  ;  docLink = [ExpectHoverText ["[Documentation](file://"]]
+  cccL17 = Position 17 11  ;  docLink = [ExpectHoverText ["[Documentation](file:///"]]
 #if MIN_GHC_API_VERSION(8,6,0)
   imported = Position 56 13 ; importedSig = getDocUri "Foo.hs" >>= \foo -> return [ExpectHoverText ["foo", "Foo", "Haddock"], mkL foo 5 0 5 3]
   reexported = Position 55 14 ; reexportedSig = getDocUri "Bar.hs" >>= \bar -> return [ExpectHoverText ["Bar", "Bar", "Haddock"], mkL bar 3 0 3 14]
@@ -2067,7 +2067,7 @@ findDefinitionAndHoverTests = let
   , test  yes    yes    mclL36     mcl           "top-level fn 1st clause"
   , test  yes    yes    mclL37     mcl           "top-level fn 2nd clause         #246"
   , test  yes    yes    spaceL37   space        "top-level fn on space #315"
-  , test  no     broken docL41     doc           "documentation                     #7"
+  , test  no     yes    docL41     doc           "documentation                     #7"
   , test  no     yes    eitL40     kindE         "kind of Either                  #273"
   , test  no     yes    intL40     kindI         "kind of Int                     #273"
   , test  no     broken tvrL40     kindV         "kind of (* -> *) type variable  #273"
@@ -2796,6 +2796,22 @@ ifaceTests = testGroup "Interface loading tests"
     , ifaceTHTest
     ]
 
+bootTests :: TestTree
+bootTests = testCase "boot-def-test" $ withoutStackEnv $ runWithExtraFiles "boot" $ \dir -> do
+  let cPath = dir </> "C.hs"
+  cSource <- liftIO $ readFileUtf8 cPath
+
+  -- Dirty the cache
+  liftIO $ runInDir dir $ do
+    cDoc <- createDoc cPath "haskell" cSource
+    _ <- getHover cDoc $ Position 4 3
+    closeDoc cDoc
+
+  cdoc <- createDoc cPath "haskell" cSource
+  locs <- getDefinitions cdoc (Position 7 4)
+  let floc = mkR 7 0 7 1
+  checkDefs locs (pure [floc])
+
 -- | test that TH reevaluates across interfaces
 ifaceTHTest :: TestTree
 ifaceTHTest = testCase "iface-th-test" $ withoutStackEnv $ runWithExtraFiles "TH" $ \dir -> do
@@ -2821,28 +2837,26 @@ ifaceTHTest = testCase "iface-th-test" $ withoutStackEnv $ runWithExtraFiles "TH
 
 ifaceErrorTest :: TestTree
 ifaceErrorTest = testCase "iface-error-test-1" $ withoutStackEnv $ runWithExtraFiles "recomp" $ \dir -> do
-    let aPath = dir </> "A.hs"
-        bPath = dir </> "B.hs"
+    let bPath = dir </> "B.hs"
         pPath = dir </> "P.hs"
 
-    aSource <- liftIO $ readFileUtf8 aPath -- x = y :: Int
     bSource <- liftIO $ readFileUtf8 bPath -- y :: Int
     pSource <- liftIO $ readFileUtf8 pPath -- bar = x :: Int
 
     bdoc <- createDoc bPath "haskell" bSource
-    pdoc <- createDoc pPath "haskell" pSource
     expectDiagnostics [("P.hs", [(DsWarning,(4,0), "Top-level binding")]) -- So what we know P has been loaded
                       ]
 
     -- Change y from Int to B
     changeDoc bdoc [TextDocumentContentChangeEvent Nothing Nothing $ T.unlines ["module B where", "y :: Bool", "y = undefined"]]
+    -- save so that we can that the error propogates to A
+    sendNotification TextDocumentDidSave (DidSaveTextDocumentParams bdoc)
 
     -- Check that the error propogates to A
-    adoc <- createDoc aPath "haskell" aSource
     expectDiagnostics
       [("A.hs", [(DsError, (5, 4), "Couldn't match expected type 'Int' with actual type 'Bool'")])]
-    closeDoc adoc -- Close A
 
+    pdoc <- createDoc pPath "haskell" pSource
     changeDoc pdoc [TextDocumentContentChangeEvent Nothing Nothing $ pSource <> "\nfoo = y :: Bool" ]
     -- Now in P we have
     -- bar = x :: Int

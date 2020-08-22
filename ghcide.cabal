@@ -70,7 +70,8 @@ library
         transformers,
         unordered-containers >= 0.2.10.0,
         utf8-string,
-        hslogger
+        hslogger,
+        opentelemetry ==0.4.*
     if flag(ghc-lib)
       build-depends:
         ghc-lib >= 8.8,
@@ -169,9 +170,7 @@ library
         Development.IDE.Import.FindImports
         Development.IDE.LSP.Notifications
         Development.IDE.Spans.AtPoint
-        Development.IDE.Spans.Calculate
         Development.IDE.Spans.Documentation
-        Development.IDE.Spans.Type
         Development.IDE.Plugin.CodeAction.PositionIndexed
         Development.IDE.Plugin.CodeAction.Rules
         Development.IDE.Plugin.CodeAction.RuleTypes
@@ -263,6 +262,7 @@ executable ghcide
                 "-with-rtsopts=-I0 -qg -A128M"
     main-is: Main.hs
     build-depends:
+        aeson,
         base == 4.*,
         data-default,
         directory,
@@ -274,6 +274,7 @@ executable ghcide
         haskell-lsp-types,
         hie-bios >= 0.6.0 && < 0.7,
         ghcide,
+        lens,
         optparse-applicative,
         text,
         unordered-containers

@@ -14,18 +14,19 @@ module Development.IDE.Core.RuleTypes(
 import           Control.DeepSeq
 import Data.Binary
 import           Development.IDE.Import.DependencyInformation
-import Development.IDE.GHC.Compat
+import Development.IDE.GHC.Compat hiding (HieFileResult)
 import Development.IDE.GHC.Util
 import           Data.Hashable
 import           Data.Typeable
 import qualified Data.Set as S
+import qualified Data.Map as M
 import           Development.Shake
 import           GHC.Generics                             (Generic)
 
 import Module (InstalledUnitId)
 import HscTypes (hm_iface, CgGuts, Linkable, HomeModInfo, ModDetails)
 
-import           Development.IDE.Spans.Type
+import           Development.IDE.Spans.Common
 import           Development.IDE.Import.FindImports (ArtifactsLocation)
 import Data.ByteString (ByteString)
 
@@ -46,11 +47,18 @@ type instance RuleResult GetDependencyInformation = DependencyInformation
 -- This rule is also responsible for calling ReportImportCycles for each file in the transitive closure.
 type instance RuleResult GetDependencies = TransitiveDependencies
 
+type instance RuleResult GetModuleGraph = DependencyInformation
+
 -- | Contains the typechecked module and the OrigNameCache entry for
 -- that module.
 data TcModuleResult = TcModuleResult
     { tmrModule     :: TypecheckedModule
+    -- ^ warning, the ModIface in the tm_checked_module_info of the
+    -- TypecheckedModule will always be Nothing, use the ModIface in the
+    -- HomeModInfo instead
     , tmrModInfo    :: HomeModInfo
+    , tmrDeferedError :: !Bool -- ^ Did we defer any type errors for this module?
+    , tmrHieFile    :: Maybe HieFile
     }
 instance Show TcModuleResult where
     show = show . pm_mod_summary . tm_parsed_module . tmrModule
@@ -86,8 +94,25 @@ instance Show HiFileResult where
 -- | The type checked version of this file, requires TypeCheck+
 type instance RuleResult TypeCheck = TcModuleResult
 
+data HieFileResult = HFR { hieFile :: !HieFile, refmap :: !RefMap }
+
+instance NFData HieFileResult where
+    rnf (HFR hf rm) = rnf hf `seq` rnf rm
+
+instance Show HieFileResult where
+    show = show . hie_module . hieFile
+
 -- | Information about what spans occur where, requires TypeCheck
-type instance RuleResult GetSpanInfo = SpansInfo
+type instance RuleResult GetHieFile = HieFileResult
+
+newtype PDocMap = PDocMap {getDocMap :: DocMap}
+instance NFData PDocMap where
+    rnf = rwhnf
+
+instance Show PDocMap where
+    show = const "docmap"
+
+type instance RuleResult GetDocMap = PDocMap
 
 -- | Convert to Core, requires TypeCheck*
 type instance RuleResult GenerateCore = (SafeHaskellMode, CgGuts, ModDetails)
@@ -145,6 +170,12 @@ instance Hashable GetDependencyInformation
 instance NFData   GetDependencyInformation
 instance Binary   GetDependencyInformation
 
+data GetModuleGraph = GetModuleGraph
+    deriving (Eq, Show, Typeable, Generic)
+instance Hashable GetModuleGraph
+instance NFData   GetModuleGraph
+instance Binary   GetModuleGraph
+
 data ReportImportCycles = ReportImportCycles
     deriving (Eq, Show, Typeable, Generic)
 instance Hashable ReportImportCycles
@@ -163,11 +194,18 @@ instance Hashable TypeCheck
 instance NFData   TypeCheck
 instance Binary   TypeCheck
 
-data GetSpanInfo = GetSpanInfo
+data GetHieFile = GetHieFile
     deriving (Eq, Show, Typeable, Generic)
-instance Hashable GetSpanInfo
-instance NFData   GetSpanInfo
-instance Binary   GetSpanInfo
+instance Hashable GetHieFile
+instance NFData   GetHieFile
+instance Binary   GetHieFile
+
+data GetDocMap = GetDocMap
+    deriving (Eq, Show, Typeable, Generic)
+
+instance Hashable GetDocMap
+instance NFData   GetDocMap
+instance Binary   GetDocMap
 
 data GenerateCore = GenerateCore
     deriving (Eq, Show, Typeable, Generic)
