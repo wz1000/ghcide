@@ -37,6 +37,8 @@ import Development.IDE.Types.Diagnostics
 import Development.IDE.Types.Location
 import Development.IDE.Core.OfInterest (kick)
 import Development.IDE.Core.RuleTypes
+import Development.IDE.Types.Options
+import Development.IDE.Core.Compile
 import qualified Data.Rope.UTF16 as Rope
 import Development.IDE.Import.DependencyInformation
 
@@ -205,23 +207,25 @@ setBufferModified state absFile contents = do
 -- | Note that some buffer for a specific file has been modified but not
 -- with what changes.
 setFileModified :: IdeState
-                -> Bool -- ^ True indicates that we should also attempt to recompile
-                        -- modules which depended on this file. Currently
-                        -- it is true when saving but not on normal
-                        -- document modification events
+                -> Bool -- ^ Was the file saved or just opened?
                 -> NormalizedFilePath
                 -> IO ()
-setFileModified state prop nfp = do
+setFileModified state savedOrOpened nfp = do
+    ideOptions <- getIdeOptionsIO $ shakeExtras state
+    let checkParents = case optCheckParents ideOptions of
+          AlwaysCheck -> True
+          CheckOnSave -> savedOrOpened
+          _ -> False
     VFSHandle{..} <- getIdeGlobalState state
     when (isJust setVirtualFileContents) $
         fail "setSomethingModified can't be called on this type of VFSHandle"
     let da = mkDelayedAction "FileStoreTC" L.Info $ do
           ShakeExtras{progressUpdate} <- getShakeExtras
           liftIO $ progressUpdate KickStarted
-          void $ use GetHieFile nfp
+          use GetHieFile nfp
           liftIO $ progressUpdate KickCompleted
     shakeRestart state [da]
-    when prop $
+    when checkParents $
       typecheckParents state nfp
 
 typecheckParents :: IdeState -> NormalizedFilePath -> IO ()

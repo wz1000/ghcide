@@ -62,6 +62,7 @@ import Data.IntMap.Strict (IntMap)
 import Data.List
 import qualified Data.Set                                 as Set
 import qualified Data.HashSet                             as HS
+import qualified Data.HashMap.Strict                      as HM
 import qualified Data.Text                                as T
 import           Development.IDE.GHC.Error
 import           Development.Shake                        hiding (Diagnostic)
@@ -219,7 +220,7 @@ refsAtPoint file pos = runMaybeT $ do
     hiedb <- lift $ asks hiedb
     _ <- lift $ runMaybeT $ reportDbState hiedb
     !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
-    AtPoint.referencesAtPoint hiedb undefined hf rf pos'
+    AtPoint.referencesAtPoint hiedb hf rf pos'
 
 workspaceSymbols :: T.Text -> IdeAction (Maybe [SymbolInformation])
 workspaceSymbols query = runMaybeT $ do
@@ -549,7 +550,8 @@ typeCheckRule = define $ \TypeCheck file -> do
     hsc  <- hscEnv <$> use_ GhcSessionDeps file
     -- do not generate interface files as this rule is called
     -- for files of interest on every keystroke
-    typeCheckRuleDefinition hsc pm SkipGenerationOfInterfaceFiles
+    isFoi <- use_ IsFileOfInterest file
+    typeCheckRuleDefinition hsc pm isFoi
 
 data GetKnownFiles = GetKnownFiles
   deriving (Show, Generic, Eq, Ord)
@@ -570,11 +572,6 @@ getModuleGraphRule = defineNoFile $ \GetModuleGraph -> do
   rawDepInfo <- rawDependencyInformation (HS.toList fs)
   pure $ processDependencyInformation rawDepInfo
 
-data GenerateInterfaceFiles
-    = DoGenerateInterfaceFiles
-    | SkipGenerationOfInterfaceFiles
-    deriving (Show)
-
 -- This is factored out so it can be directly called from the GetModIface
 -- rule. Directly calling this rule means that on the initial load we can
 -- garbage collect all the intermediate typechecked modules rather than
@@ -582,9 +579,9 @@ data GenerateInterfaceFiles
 typeCheckRuleDefinition
     :: HscEnv
     -> ParsedModule
-    -> GenerateInterfaceFiles -- ^ Should generate .hi and .hie files ?
+    -> IsFileOfInterestResult -- ^ Should generate .hi and .hie files ?
     -> Action (IdeResult TcModuleResult)
-typeCheckRuleDefinition hsc pm generateArtifacts = do
+typeCheckRuleDefinition hsc pm isFoi = do
   setPriority priorityTypeCheck
   IdeOptions { optDefer = defer } <- getIdeOptions
 
@@ -592,15 +589,18 @@ typeCheckRuleDefinition hsc pm generateArtifacts = do
   addUsageDependencies $ liftIO $ do
     res <- typecheckModule defer hsc pm
     case res of
-      (diags, Just (hsc,tcm))
-        | DoGenerateInterfaceFiles <- generateArtifacts
-        -> do
-        diagsHie <- writeAndIndexHieFile hsc hiedbChan (tmrModSummary tcm) (tmrHieFile tcm) (mi_decl_docs $ hm_iface $ tmrModInfo tcm)
-        -- Don't save interface files for modules that compiled due to defering
-        -- type errors, as we won't get proper diagnostics if we load these from
-        -- disk
-        diagsHi  <- if not $ tmrDeferedError tcm then writeHiFile hsc tcm else pure mempty
-        return (diags <> diagsHi <> diagsHie, Just tcm)
+      (diags, Just (hsc,tcm)) -> do
+        case isFoi of
+          IsFOI Modified -> return (diags, Just tcm)
+          _ -> do -- If the file is saved on disk, or is not a FOI, we write out ifaces
+            let dflags = hsc_dflags hsc
+                docs = mi_decl_docs $ hm_iface $ tmrModInfo tcm
+            diagsHie <- writeAndIndexHieFile dflags hiedbChan (tmrModSummary tcm) (tmrHieFile tcm) docs
+            -- Don't save interface files for modules that compiled due to defering
+            -- type errors, as we won't get proper diagnostics if we load these from
+            -- disk
+            diagsHi  <- if not $ tmrDeferedError tcm then writeHiFile hsc tcm else pure mempty
+            return (diags <> diagsHi <> diagsHie, Just tcm)
       (diags, res) ->
         return (diags, snd <$> res)
  where
@@ -800,18 +800,18 @@ getModSummaryRule = do
 getModIfaceRule :: Rules ()
 getModIfaceRule = defineEarlyCutoff $ \GetModIface f -> do
 #if MIN_GHC_API_VERSION(8,6,0) && !defined(GHC_LIB)
-    fileOfInterest <- use_ IsFileOfInterest f
-    if fileOfInterest
-        then do
-            -- Never load from disk for files of interest
-            tmr <- use TypeCheck f
-            let !hiFile = extractHiFileResult tmr
-            let fp = hiFileFingerPrint <$> hiFile
-            return (fp, ([], hiFile))
-        else do
-            hiFile <- use GetModIfaceFromDisk f
-            let fp = hiFileFingerPrint <$> hiFile
-            return (fp, ([], hiFile))
+  fileOfInterest <- use_ IsFileOfInterest f
+  case fileOfInterest of
+    IsFOI _ -> do
+      -- Never load from disk for files of interest
+      tmr <- use TypeCheck f
+      let !hiFile = extractHiFileResult tmr
+      let fp = hiFileFingerPrint <$> hiFile
+      return (fp, ([], hiFile))
+    NotFOI -> do
+      hiFile <- use GetModIfaceFromDisk f
+      let fp = hiFileFingerPrint <$> hiFile
+      return (fp, ([], hiFile))
 #else
     tm <- use TypeCheck f
     let !hiFile = extractHiFileResult tm
@@ -841,7 +841,7 @@ regenerateHiFile sess f = do
         Just pm -> do
             -- Invoke typechecking directly to update it without incurring a dependency
             -- on the parsed module and the typecheck rules
-            (diags', tmr) <- typeCheckRuleDefinition hsc pm DoGenerateInterfaceFiles
+            (diags', tmr) <- typeCheckRuleDefinition hsc pm NotFOI
             -- Bang pattern is important to avoid leaking 'tmr'
             let !res = extractHiFileResult tmr
             return (diags <> diags', res)
@@ -855,8 +855,10 @@ extractHiFileResult (Just tmr) =
 isFileOfInterestRule :: Rules ()
 isFileOfInterestRule = defineEarlyCutoff $ \IsFileOfInterest f -> do
     filesOfInterest <- getFilesOfInterest
-    let res = f `elem` filesOfInterest
-    return (Just (if res then "1" else ""), ([], Just res))
+    let res = case f `HM.lookup` filesOfInterest of
+          Just x -> IsFOI x
+          Nothing -> NotFOI
+    return (Just $ BS.pack $ show $ hash res, ([], Just res))
 
 -- | A rule that wires per-file rules together
 mainRule :: Rules ()

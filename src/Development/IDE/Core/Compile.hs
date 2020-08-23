@@ -306,12 +306,11 @@ addHieFileToDb hiechan targetPath isBoot srcPath hf docs = do
     addRefsFromLoaded db targetPath isBoot srcPath time hf docs
     hPutStrLn stderr $ "Finished indexing .hie file: " ++ targetPath
 
-writeAndIndexHieFile :: HscEnv -> HieWriterChan -> ModSummary -> HieFile -> DeclDocMap -> IO [FileDiagnostic]
-writeAndIndexHieFile hscEnv hiechan mod_summary hf docs =
+writeAndIndexHieFile :: DynFlags -> HieWriterChan -> ModSummary -> HieFile -> DeclDocMap -> IO [FileDiagnostic]
+writeAndIndexHieFile dflags hiechan mod_summary hf docs =
   handleWritingErrors dflags "extended interface write" $
     addHieFileToDb hiechan targetPath isBoot path hf docs
   where
-    dflags       = hsc_dflags hscEnv
     mod_location = ms_location mod_summary
     targetPath   = Compat.ml_hie_file mod_location
     path         = ml_hs_file mod_location

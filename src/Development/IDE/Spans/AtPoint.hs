@@ -63,12 +63,11 @@ rowToLoc (row:.info) = do
 referencesAtPoint
   :: MonadIO m
   => HieDb
-  -> LookupModule m
   -> HieFile
   -> RefMap
   -> Position
   -> MaybeT m [Location]
-referencesAtPoint hiedb lookupModule hf rf pos = do
+referencesAtPoint hiedb hf rf pos = do
   let names = concat $ pointCommand hf pos (rights . M.keys . nodeIdentifiers . nodeInfo)
   locs <- forM names $ \name ->
     case nameModule_maybe name of

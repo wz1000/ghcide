@@ -74,6 +74,7 @@ import Maybes (MaybeT(runMaybeT))
 import HIE.Bios.Types (CradleLoadResult(..))
 import HIE.Bios.Environment (getRuntimeGhcLibDir)
 import DynFlags
+import qualified Data.HashMap.Strict as HashMap
 
 --import Rules
 --import RuleTypes
@@ -225,7 +226,7 @@ runIde dir Arguments{..} hiedb hiechan = do
         ide <- initialise def mainRule (pure $ IdInt 0) (showEvent lock) dummyWithProg (const (const id)) (logger minBound) debouncer (defaultIdeOptions sessionLoader) vfs hiedb hiechan
 
         putStrLn "\nStep 4/4: Type checking the files"
-        setFilesOfInterest ide $ HashSet.fromList $ map toNormalizedFilePath' files
+        setFilesOfInterest ide $ HashMap.fromList $ map ((, OnDisk) . toNormalizedFilePath') files
         results <- runAction "User TypeCheck" ide $ uses TypeCheck (map toNormalizedFilePath' files)
         let (worked, failed) = partition fst $ zip (map isJust results) files
         when (failed /= []) $

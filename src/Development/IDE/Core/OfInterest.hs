@@ -9,7 +9,7 @@
 module Development.IDE.Core.OfInterest(
     ofInterestRules,
     getFilesOfInterest, setFilesOfInterest, modifyFilesOfInterest,
-    kick
+    kick, FileOfInterestStatus(..)
     ) where
 
 import Control.Concurrent.Extra
@@ -20,8 +20,8 @@ import GHC.Generics
 import Data.Typeable
 import qualified Data.ByteString.UTF8 as BS
 import Control.Exception
-import Data.HashSet (HashSet)
-import qualified Data.HashSet as HashSet
+import Data.HashMap.Strict (HashMap)
+import qualified Data.HashMap.Strict as HashMap
 import qualified Data.Text as T
 import Data.Tuple.Extra
 import Development.Shake
@@ -32,10 +32,10 @@ import Development.IDE.Core.RuleTypes
 import Development.IDE.Core.Shake
 import Control.Monad
 
-newtype OfInterestVar = OfInterestVar (Var (HashSet NormalizedFilePath))
+newtype OfInterestVar = OfInterestVar (Var (HashMap NormalizedFilePath FileOfInterestStatus))
 instance IsIdeGlobal OfInterestVar
 
-type instance RuleResult GetFilesOfInterest = HashSet NormalizedFilePath
+type instance RuleResult GetFilesOfInterest = HashMap NormalizedFilePath FileOfInterestStatus
 
 data GetFilesOfInterest = GetFilesOfInterest
     deriving (Eq, Show, Typeable, Generic)
@@ -47,7 +47,7 @@ instance Binary   GetFilesOfInterest
 -- | The rule that initialises the files of interest state.
 ofInterestRules :: Rules ()
 ofInterestRules = do
-    addIdeGlobal . OfInterestVar =<< liftIO (newVar HashSet.empty)
+    addIdeGlobal . OfInterestVar =<< liftIO (newVar HashMap.empty)
     defineEarlyCutoff $ \GetFilesOfInterest _file -> assert (null $ fromNormalizedFilePath _file) $ do
         alwaysRerun
         filesOfInterest <- getFilesOfInterestUntracked
@@ -55,7 +55,7 @@ ofInterestRules = do
 
 
 -- | Get the files that are open in the IDE.
-getFilesOfInterest :: Action (HashSet NormalizedFilePath)
+getFilesOfInterest :: Action (HashMap NormalizedFilePath FileOfInterestStatus)
 getFilesOfInterest = useNoFile_ GetFilesOfInterest
 
 
@@ -65,21 +65,24 @@ getFilesOfInterest = useNoFile_ GetFilesOfInterest
 
 -- | Set the files-of-interest - not usually necessary or advisable.
 --   The LSP client will keep this information up to date.
-setFilesOfInterest :: IdeState -> HashSet NormalizedFilePath -> IO ()
+setFilesOfInterest :: IdeState -> HashMap NormalizedFilePath FileOfInterestStatus -> IO ()
 setFilesOfInterest state files = modifyFilesOfInterest state (const files)
 
-getFilesOfInterestUntracked :: Action (HashSet NormalizedFilePath)
+getFilesOfInterestUntracked :: Action (HashMap NormalizedFilePath FileOfInterestStatus)
 getFilesOfInterestUntracked = do
     OfInterestVar var <- getIdeGlobalAction
     liftIO $ readVar var
 
 -- | Modify the files-of-interest - not usually necessary or advisable.
 --   The LSP client will keep this information up to date.
-modifyFilesOfInterest :: IdeState -> (HashSet NormalizedFilePath -> HashSet NormalizedFilePath) -> IO ()
+modifyFilesOfInterest
+  :: IdeState
+  -> (HashMap NormalizedFilePath FileOfInterestStatus -> HashMap NormalizedFilePath FileOfInterestStatus)
+  -> IO ()
 modifyFilesOfInterest state f = do
     OfInterestVar var <- getIdeGlobalState state
     files <- modifyVar var $ pure . dupe . f
-    logDebug (ideLogger state) $ "Set files of interest to: " <> T.pack (show $ HashSet.toList files)
+    logDebug (ideLogger state) $ "Set files of interest to: " <> T.pack (show $ HashMap.toList files)
 
 -- | Typecheck all the files of interest.
 --   Could be improved
@@ -88,5 +91,5 @@ kick = mkDelayedAction "kick" Debug $ do
     files <- getFilesOfInterest
     ShakeExtras{progressUpdate} <- getShakeExtras
     liftIO $ progressUpdate KickStarted
-    void $ uses TypeCheck $ HashSet.toList files
+    void $ uses TypeCheck $ HashMap.keys files
     liftIO $ progressUpdate KickCompleted
