@@ -578,14 +578,14 @@ typeCheckRuleDefinition hsc pm isFoi = do
         case isFoi of
           IsFOI Modified -> return (diags, Just tcm)
           _ -> do -- If the file is saved on disk, or is not a FOI, we write out ifaces
-            diagsHie <- generateAndWriteHieFile hsc (tmrModule tcm)
+            (diagsHie, hf) <- generateAndWriteHieFile hsc (tmrModule tcm)
             -- Don't save interface files for modules that compiled due to defering
             -- type errors, as we won't get proper diagnostics if we load these from
             -- disk
             diagsHi  <- if not $ tmrDeferedError tcm
                         then writeHiFile hsc tcm
                         else pure mempty
-            return (diags <> diagsHi <> diagsHie, Just tcm)
+            return (diags <> diagsHi <> diagsHie, Just tcm{tmrHieFile = hf})
       (diags, res) ->
         return (diags, snd <$> res)
  where
