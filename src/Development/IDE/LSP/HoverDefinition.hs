@@ -58,7 +58,7 @@ request
   -> IdeState
   -> TextDocumentPositionParams
   -> IO (Either ResponseError b)
-request label getResults notFound found ide (TextDocumentPositionParams (TextDocumentIdentifier uri) pos _) = otTraced ("Request:" <> T.unpack label) $ do
+request label getResults notFound found ide (TextDocumentPositionParams (TextDocumentIdentifier uri) pos _) = otTraced ("Request:" <> TE.encodeUtf8 label) $ do
     mbResult <- case uriToFilePath' uri of
         Just path -> logAndRunRequest label getResults ide pos path
         Nothing   -> pure Nothing
