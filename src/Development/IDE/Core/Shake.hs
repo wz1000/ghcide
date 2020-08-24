@@ -424,7 +424,7 @@ shakeOpen getLspId eventer withProgress withIndefiniteProgress logger debouncer
     shakeSession <- newMVar initSession
     let ideState = IdeState{..}
 
-    startTelemetry "Values map" (state shakeExtras)
+    startTelemetry "Values map" (state shakeExtras) =<< (optOTProfiling <$> getIdeOptionsIO shakeExtras)
 
     return ideState
     where
