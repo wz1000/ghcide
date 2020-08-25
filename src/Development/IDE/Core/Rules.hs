@@ -586,8 +586,8 @@ typeCheckRuleDefinition hsc pm isFoi = do
   IdeOptions { optDefer = defer } <- getIdeOptions
 
   ShakeExtras{hiedbChan} <- getShakeExtras
-  addUsageDependencies $ liftIO $ do
-    res <- typecheckModule defer hsc pm
+  addUsageDependencies $ do
+    res <- liftIO $ typecheckModule defer hsc pm
     case res of
       (diags, Just (hsc,tcm)) -> do
         case isFoi of
@@ -595,11 +595,11 @@ typeCheckRuleDefinition hsc pm isFoi = do
           _ -> do -- If the file is saved on disk, or is not a FOI, we write out ifaces
             let dflags = hsc_dflags hsc
                 docs = mi_decl_docs $ hm_iface $ tmrModInfo tcm
-            diagsHie <- writeAndIndexHieFile dflags hiedbChan (tmrModSummary tcm) (tmrHieFile tcm) docs
+            diagsHie <- liftIO $ writeAndIndexHieFile dflags hiedbChan (pm_mod_summary pm) (tmrHieFile tcm) docs
             -- Don't save interface files for modules that compiled due to defering
             -- type errors, as we won't get proper diagnostics if we load these from
             -- disk
-            diagsHi  <- if not $ tmrDeferedError tcm then writeHiFile hsc tcm else pure mempty
+            diagsHi  <- liftIO $ if not $ tmrDeferedError tcm then writeHiFile hsc tcm else pure mempty
             return (diags <> diagsHi <> diagsHie, Just tcm)
       (diags, res) ->
         return (diags, snd <$> res)
@@ -852,14 +852,6 @@ extractHiFileResult (Just tmr) =
     -- Bang patterns are important to force the inner fields
     Just $! tmr_hiFileResult tmr
 
-isFileOfInterestRule :: Rules ()
-isFileOfInterestRule = defineEarlyCutoff $ \IsFileOfInterest f -> do
-    filesOfInterest <- getFilesOfInterest
-    let res = case f `HM.lookup` filesOfInterest of
-          Just x -> IsFOI x
-          Nothing -> NotFOI
-    return (Just $ BS.pack $ show $ hash res, ([], Just res))
-
 -- | A rule that wires per-file rules together
 mainRule :: Rules ()
 mainRule = do
@@ -875,7 +867,6 @@ mainRule = do
     loadGhcSession
     getModIfaceFromDiskRule
     getModIfaceRule
-    isFileOfInterestRule
     getModSummaryRule
     isHiFileStableRule
     getModuleGraphRule

@@ -297,20 +297,20 @@ atomicFileWrite targetPath write = do
   (tempFilePath, cleanUp) <- newTempFileWithin dir
   (write tempFilePath >> renameFile tempFilePath targetPath) `onException` cleanUp
 
-addHieFileToDb :: HieWriterChan -> FilePath -> Bool -> Maybe FilePath -> Compat.HieFile -> DeclDocMap -> IO ()
-addHieFileToDb hiechan targetPath isBoot srcPath hf docs = do
+addHieFileToDb :: HieWriterChan -> UTCTime -> FilePath -> Bool -> Maybe FilePath -> Compat.HieFile -> DeclDocMap -> IO ()
+addHieFileToDb hiechan modtime targetPath isBoot srcPath hf docs = do
   writeChan hiechan $ \db -> do
-    atomicFileWrite targetPath $ flip GHC.writeHieFile hf
-    time <- getModificationTime targetPath
     hPutStrLn stderr $ "Started indexing .hie file: " ++ targetPath ++ " for: " ++ show srcPath
-    addRefsFromLoaded db targetPath isBoot srcPath time hf docs
+    addRefsFromLoaded db targetPath isBoot srcPath modtime hf docs
     hPutStrLn stderr $ "Finished indexing .hie file: " ++ targetPath
 
 writeAndIndexHieFile :: DynFlags -> HieWriterChan -> ModSummary -> HieFile -> DeclDocMap -> IO [FileDiagnostic]
 writeAndIndexHieFile dflags hiechan mod_summary hf docs =
-  handleWritingErrors dflags "extended interface write" $
-    addHieFileToDb hiechan targetPath isBoot path hf docs
+  handleWritingErrors dflags "extended interface write" $ do
+    atomicFileWrite targetPath $ flip GHC.writeHieFile hf
+    addHieFileToDb hiechan modtime targetPath isBoot path hf docs
   where
+    modtime      = ms_hs_date mod_summary
     mod_location = ms_location mod_summary
     targetPath   = Compat.ml_hie_file mod_location
     path         = ml_hs_file mod_location
