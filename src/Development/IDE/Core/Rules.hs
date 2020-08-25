@@ -180,11 +180,11 @@ getDefinition file pos = runMaybeT $ do
     (HFR hf _, mapping) <- useE GetHieFile file
     !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
     hiedb <- lift $ asks hiedb
-    hiedbChan <- lift $ asks hiedbChan
+    hiedbChan <- lift $ asks hiedbWriter
     let origFile
          | "cached-deps" `isInfixOf` (fromNormalizedFilePath file) = Just file
          | otherwise = Nothing
-    AtPoint.gotoDefinition hiedb (lookupMod hiedbChan) opts hf origFile pos'
+    AtPoint.gotoDefinition hiedb (lookupMod $ channel hiedbChan) opts hf origFile pos'
 
 getTypeDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe [Location])
 getTypeDefinition file pos = runMaybeT $ do
@@ -193,11 +193,11 @@ getTypeDefinition file pos = runMaybeT $ do
     (HFR hf _, mapping) <- useE GetHieFile file
     !pos' <- MaybeT (return $ fromCurrentPosition mapping pos)
     hiedb <- lift $ asks hiedb
-    hiedbChan <- lift $ asks hiedbChan
+    hiedbChan <- lift $ asks hiedbWriter
     let origFile
          | "cached-deps" `isInfixOf` (fromNormalizedFilePath file) = Just file
          | otherwise = Nothing
-    AtPoint.gotoTypeDefinition hiedb (lookupMod hiedbChan) opts hf origFile pos'
+    AtPoint.gotoTypeDefinition hiedb (lookupMod $ channel hiedbChan) opts hf origFile pos'
 
 highlightAtPoint :: NormalizedFilePath -> Position -> IdeAction (Maybe [DocumentHighlight])
 highlightAtPoint file pos = runMaybeT $ do
@@ -551,7 +551,7 @@ typeCheckRule = define $ \TypeCheck file -> do
     -- do not generate interface files as this rule is called
     -- for files of interest on every keystroke
     isFoi <- use_ IsFileOfInterest file
-    typeCheckRuleDefinition hsc pm isFoi
+    typeCheckRuleDefinition hsc file pm isFoi
 
 data GetKnownFiles = GetKnownFiles
   deriving (Show, Generic, Eq, Ord)
@@ -578,14 +578,15 @@ getModuleGraphRule = defineNoFile $ \GetModuleGraph -> do
 -- retain the information forever in the shake graph.
 typeCheckRuleDefinition
     :: HscEnv
+    -> NormalizedFilePath
     -> ParsedModule
     -> IsFileOfInterestResult -- ^ Should generate .hi and .hie files ?
     -> Action (IdeResult TcModuleResult)
-typeCheckRuleDefinition hsc pm isFoi = do
+typeCheckRuleDefinition hsc nfp pm isFoi = do
   setPriority priorityTypeCheck
   IdeOptions { optDefer = defer } <- getIdeOptions
 
-  ShakeExtras{hiedbChan} <- getShakeExtras
+  ShakeExtras{hiedbWriter} <- getShakeExtras
   addUsageDependencies $ do
     res <- liftIO $ typecheckModule defer hsc pm
     case res of
@@ -595,7 +596,7 @@ typeCheckRuleDefinition hsc pm isFoi = do
           _ -> do -- If the file is saved on disk, or is not a FOI, we write out ifaces
             let dflags = hsc_dflags hsc
                 docs = mi_decl_docs $ hm_iface $ tmrModInfo tcm
-            diagsHie <- liftIO $ writeAndIndexHieFile dflags hiedbChan (pm_mod_summary pm) (tmrHieFile tcm) docs
+            diagsHie <- liftIO $ writeAndIndexHieFile dflags hiedbWriter (pm_mod_summary pm) nfp (tmrHieFile tcm) docs
             -- Don't save interface files for modules that compiled due to defering
             -- type errors, as we won't get proper diagnostics if we load these from
             -- disk
@@ -731,6 +732,17 @@ getModIfaceFromDiskRule = defineEarlyCutoff $ \GetModIfaceFromDisk f -> do
         case r of
             (diags, Just x) -> do
                 let fp = Just (hiFileFingerPrint x)
+                -- Check state of hiedb
+                se@ShakeExtras{hiedb,hiedbWriter} <- getShakeExtras
+                mrow <- liftIO $ HieDb.lookupHieFileFromSource hiedb (fromNormalizedFilePath f)
+                case mrow of
+                  Just row | ms_hs_date ms <= HieDb.modInfoTime (HieDb.hieModInfo row) -> pure ()
+                  _ -> liftIO $ do
+                    mhf <- runIdeAction "GetModIfaceFromDisk" se $ runMaybeT $
+                      readHieFileFromDisk (ml_hie_file $ ms_location ms)
+                    case mhf of
+                      Nothing -> pure ()
+                      Just hf -> indexHieFile hiedbWriter ms f hf (mi_decl_docs $ hirModIface x)
                 return (fp, (diags <> diags_session, Just x))
             (diags, Nothing) -> return (Nothing, (diags ++ diags_session, Nothing))
 
@@ -841,7 +853,7 @@ regenerateHiFile sess f = do
         Just pm -> do
             -- Invoke typechecking directly to update it without incurring a dependency
             -- on the parsed module and the typecheck rules
-            (diags', tmr) <- typeCheckRuleDefinition hsc pm NotFOI
+            (diags', tmr) <- typeCheckRuleDefinition hsc f pm NotFOI
             -- Bang pattern is important to avoid leaking 'tmr'
             let !res = extractHiFileResult tmr
             return (diags <> diags', res)

@@ -63,6 +63,7 @@ module Development.IDE.Core.Shake(
     -- Exposed for testing.
     Q(..),
     HieWriterChan,
+    HieDbWriter(..),
     addPersistentRule
     ) where
 
@@ -127,6 +128,11 @@ import Data.Int (Int64)
 
 import HieDb.Types
 
+data HieDbWriter
+  = HieDbWriter
+  { channel :: HieWriterChan
+  , pendingIndexes :: Var (HSet.HashSet NormalizedFilePath)
+  }
 type HieWriterChan = Chan (HieDb -> IO ())
 
 -- information we stash inside the shakeExtra field
@@ -162,7 +168,7 @@ data ShakeExtras = ShakeExtras
     ,ideNc :: IORef NameCache
     ,knownFilesVar :: Var (Hashed (HSet.HashSet NormalizedFilePath))
     , hiedb :: HieDb -- ^ Use only to read
-    , hiedbChan :: HieWriterChan -- ^ use to write
+    , hiedbWriter :: HieDbWriter -- ^ use to write
     , persistentKeys :: Var (HMap.HashMap Key GetStalePersistent)
     }
 
@@ -444,6 +450,8 @@ shakeOpen getLspId eventer withProgress withIndefiniteProgress logger debouncer
         mostRecentProgressEvent <- newTVarIO KickCompleted
         persistentKeys <- newVar HMap.empty
         let progressUpdate = atomically . writeTVar mostRecentProgressEvent
+        pendingIndexes <- newVar HSet.empty
+        let hiedbWriter = HieDbWriter hiedbChan pendingIndexes
         progressAsync <- async $
             when reportProgress $
                 progressThread mostRecentProgressEvent inProgress

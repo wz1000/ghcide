@@ -20,7 +20,7 @@ module Development.IDE.Core.Compile
   , generateByteCode
   , writeAndIndexHieFile
   , writeHiFile
-  , addHieFileToDb
+  , indexHieFile
   , getModSummaryFromImports
   , loadHieFile
   , loadInterface
@@ -99,6 +99,8 @@ import           ConLike   (ConLike (PatSynCon))
 import           InstEnv   (updateClsInstDFun)
 import           PatSyn    (PatSyn, updatePatSynIds)
 import           TcRnTypes (TcGblEnv (TcGblEnv, tcg_exports, tcg_fam_insts, tcg_insts, tcg_keep, tcg_patsyns, tcg_tcs, tcg_type_env))
+import Control.Concurrent.Extra (modifyVar_,modifyVar)
+import qualified Data.HashSet as HashSet
 
 -- | Given a string buffer, return the string (after preprocessing) and the 'ParsedModule'.
 parseModule
@@ -297,26 +299,33 @@ atomicFileWrite targetPath write = do
   (tempFilePath, cleanUp) <- newTempFileWithin dir
   (write tempFilePath >> renameFile tempFilePath targetPath) `onException` cleanUp
 
-addHieFileToDb :: HieWriterChan -> UTCTime -> FilePath -> Bool -> Maybe FilePath -> Compat.HieFile -> DeclDocMap -> IO ()
-addHieFileToDb hiechan modtime targetPath isBoot srcPath hf docs = do
-  writeChan hiechan $ \db -> do
+indexHieFile :: HieDbWriter -> ModSummary -> NormalizedFilePath -> Compat.HieFile -> DeclDocMap -> IO ()
+indexHieFile dbwriter mod_summary srcPath hf docs = do
+  index <- modifyVar (pendingIndexes dbwriter) $ \pending -> pure $
+    if HashSet.member srcPath pending
+      then (pending,False)
+      else (HashSet.insert srcPath pending, True)
+  when index $ writeChan (channel dbwriter) $ \db -> do
     hPutStrLn stderr $ "Started indexing .hie file: " ++ targetPath ++ " for: " ++ show srcPath
-    addRefsFromLoaded db targetPath isBoot srcPath modtime hf docs
+    addRefsFromLoaded db targetPath isBoot (Just $ fromNormalizedFilePath srcPath) modtime hf docs
+    modifyVar_ (pendingIndexes dbwriter) (pure . HashSet.delete srcPath)
     hPutStrLn stderr $ "Finished indexing .hie file: " ++ targetPath
-
-writeAndIndexHieFile :: DynFlags -> HieWriterChan -> ModSummary -> HieFile -> DeclDocMap -> IO [FileDiagnostic]
-writeAndIndexHieFile dflags hiechan mod_summary hf docs =
-  handleWritingErrors dflags "extended interface write" $ do
-    atomicFileWrite targetPath $ flip GHC.writeHieFile hf
-    addHieFileToDb hiechan modtime targetPath isBoot path hf docs
   where
     modtime      = ms_hs_date mod_summary
     mod_location = ms_location mod_summary
     targetPath   = Compat.ml_hie_file mod_location
-    path         = ml_hs_file mod_location
     isBoot = case ms_hsc_src mod_summary of
       HsBootFile -> True
       _ -> False
+
+writeAndIndexHieFile :: DynFlags -> HieDbWriter -> ModSummary -> NormalizedFilePath -> HieFile -> DeclDocMap -> IO [FileDiagnostic]
+writeAndIndexHieFile dflags hiechan mod_summary srcPath hf docs =
+  handleWritingErrors dflags "extended interface write" $ do
+    atomicFileWrite targetPath $ flip GHC.writeHieFile hf
+    indexHieFile hiechan mod_summary srcPath hf docs
+  where
+    mod_location = ms_location mod_summary
+    targetPath   = Compat.ml_hie_file mod_location
 
 writeHiFile :: HscEnv -> TcModuleResult -> IO [FileDiagnostic]
 writeHiFile hscEnv tc =
