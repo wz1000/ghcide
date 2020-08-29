@@ -57,7 +57,7 @@ setHandlersNotifications = PartialHandlers $ \WithMessage{..} x -> return x
     ,LSP.didSaveTextDocumentNotificationHandler = withNotification (LSP.didSaveTextDocumentNotificationHandler x) $
         \_ ide (DidSaveTextDocumentParams TextDocumentIdentifier{_uri}) -> do
             IdeOptions{optCheckParents} <- getIdeOptionsIO $ shakeExtras ide
-            let checkParents = optCheckParents /= NeverCheck
+            let checkParents = optCheckParents >= CheckOnSaveAndClose
             whenUriFile _uri $ \file -> setFileModified ide checkParents file
             logInfo (ideLogger ide) $ "Saved text document: " <> getUri _uri
 
@@ -67,7 +67,7 @@ setHandlersNotifications = PartialHandlers $ \WithMessage{..} x -> return x
                 modifyFilesOfInterest ide (S.delete file)
                 -- Refresh all the files that depended on this
                 IdeOptions{optCheckParents} <- getIdeOptionsIO $ shakeExtras ide
-                when (optCheckParents == AlwaysCheck) $ typecheckParents ide file
+                when (optCheckParents >= CheckOnClose) $ typecheckParents ide file
                 logInfo (ideLogger ide) $ "Closed text document: " <> getUri _uri
     ,LSP.didChangeWatchedFilesNotificationHandler = withNotification (LSP.didChangeWatchedFilesNotificationHandler x) $
         \_ ide (DidChangeWatchedFilesParams fileEvents) -> do
