@@ -113,6 +113,8 @@ import Control.Monad.IO.Class
 import Control.Monad.Reader
 import Control.Monad.Trans.Maybe
 import Data.Traversable
+import Text.Printf
+import Data.Hashable
 import Development.IDE.Core.Tracing
 
 import Data.IORef
