@@ -2399,7 +2399,6 @@ thTests =
         _ <- createDoc "B.hs" "haskell" sourceB
         expectDiagnostics [ ( "B.hs", [(DsWarning, (4, 0), "Top-level binding with no type signature: main :: IO ()")] ) ]
     , testCase "findsTHnewNameConstructor" $ withoutStackEnv $ runWithExtraFiles "THNewName" $ \dir -> do
-    
     let cPath = dir </> "C.hs"
 
     -- This test defines a TH value with the meaning "data A = A" in A.hs
@@ -2407,9 +2406,8 @@ thTests =
     -- And checks wether the constructor A can be loaded in C.hs
     -- This test does not fail when either A and B get manually loaded before C.hs
     -- or when we remove the seemingly unnecessary TH pragma from C.hs
-    cSource <- liftIO $ readFileUtf8 cPath
 
-    _ <- createDoc cPath "haskell" cSource
+    _ <- openDoc cPath "haskell"
 
     expectDiagnostics [ ( cPath, [(DsWarning, (5, 0), "Top-level binding with no type signature: a :: A")] ) ]
     ]
