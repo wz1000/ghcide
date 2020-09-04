@@ -37,9 +37,12 @@ import Development.IDE.Types.Diagnostics
 import Development.IDE.Types.Location
 import Development.IDE.Core.OfInterest (kick)
 import Development.IDE.Core.RuleTypes
+import Development.IDE.Core.OfInterest
 import Development.IDE.Types.Options
 import qualified Data.Rope.UTF16 as Rope
 import Development.IDE.Import.DependencyInformation
+import qualified Data.HashMap.Strict as HM
+
 
 #ifdef mingw32_HOST_OS
 import qualified System.Directory as Dir
@@ -92,6 +95,12 @@ makeLSPVFSHandle lspFuncs = VFSHandle
     , setVirtualFileContents = Nothing
    }
 
+
+isFileOfInterestRule :: Rules ()
+isFileOfInterestRule = defineEarlyCutoff $ \IsFileOfInterest f -> do
+    filesOfInterest <- getFilesOfInterest
+    let res = maybe NotFOI IsFOI $ f `HM.lookup` filesOfInterest
+    return (Just $ BS.pack $ show $ hash res, ([], Just res))
 
 -- | Get the contents of a file, either dirty (if the buffer is modified) or Nothing to mean use from disk.
 type instance RuleResult GetFileContents = (FileVersion, Maybe T.Text)
