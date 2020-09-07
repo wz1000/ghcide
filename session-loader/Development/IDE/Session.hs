@@ -304,11 +304,12 @@ loadSession dir = do
           when checkProject $ do
             mmt <- uses GetModificationTime cfps'
             let cs_exist = catMaybes (zipWith (<$) cfps' mmt)
-            modIfaces <- uses GetModIface cs_exist
-            -- update xports map
-            extras <- getShakeExtras
-            let !exportsMap' = createExportsMap $ mapMaybe (fmap hirModIface) modIfaces
-            liftIO $ modifyVar_ (exportsMap extras) $ return . (exportsMap' <>)
+            pure ()
+            -- modIfaces <- uses GetModIface cs_exist
+            -- -- update xports map
+            -- extras <- getShakeExtras
+            -- let !exportsMap' = createExportsMap $ mapMaybe (fmap hirModIface) modIfaces
+            -- liftIO $ modifyVar_ (exportsMap extras) $ return . (exportsMap' <>)
       pure opts
 
 -- | Run the specific cradle on a specific FilePath via hie-bios.

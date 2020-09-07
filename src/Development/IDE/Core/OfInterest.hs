@@ -8,7 +8,7 @@
 --   open in the editor. The useful function is 'getFilesOfInterest'.
 module Development.IDE.Core.OfInterest(
     ofInterestRules,
-    getFilesOfInterest, setFilesOfInterest, modifyFilesOfInterest,
+    getFilesOfInterest, setFilesOfInterest, modifyFilesOfInterest, modifyFilesOfInterest',
     kick
     ) where
 
@@ -82,6 +82,11 @@ modifyFilesOfInterest state f = do
     OfInterestVar var <- getIdeGlobalState state
     files <- modifyVar var $ pure . dupe . f
     logDebug (ideLogger state) $ "Set files of interest to: " <> T.pack (show $ HashSet.toList files)
+
+modifyFilesOfInterest' :: (HashSet NormalizedFilePath -> HashSet NormalizedFilePath) -> Action ()
+modifyFilesOfInterest' f = do
+    OfInterestVar var <- getIdeGlobalAction
+    liftIO $ modifyVar_ var $ pure . f
 
 -- | Typecheck all the files of interest.
 --   Could be improved

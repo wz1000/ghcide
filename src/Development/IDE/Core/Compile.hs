@@ -92,6 +92,7 @@ import           ConLike   (ConLike (PatSynCon))
 import           InstEnv   (updateClsInstDFun)
 import           PatSyn    (PatSyn, updatePatSynIds)
 import           TcRnTypes (TcGblEnv (TcGblEnv, tcg_exports, tcg_fam_insts, tcg_insts, tcg_keep, tcg_patsyns, tcg_tcs, tcg_type_env))
+import IfaceSyn
 
 -- | Given a string buffer, return the string (after preprocessing) and the 'ParsedModule'.
 parseModule
@@ -135,6 +136,8 @@ typecheckModule (IdeDefer defer) hsc pm = do
             dflags = ms_hspp_opts modSummary
 
         modSummary' <- initPlugins modSummary
+        -- eps <- liftIO $ readIORef $ hsc_EPS hsc
+        -- liftIO $ hPutStrLn stderr $ showSDocDebug dflags $ ppr (eps_PTE eps)
         (warnings, tcm) <- withWarnings "typecheck" $ \tweak ->
             GHC.typecheckModule $ enableTopLevelWarnings
                                 $ demoteIfDefer pm{pm_mod_summary = tweak modSummary'}
@@ -274,6 +277,15 @@ mkTcModuleResult tcm upgradedError = do
 #else
     (iface, _) <- liftIO $ mkIfaceTc session Nothing sf details tcGblEnv
 #endif
+    liftIO $ hPutStrLn stderr $ "TTTTT#####################################################"
+    liftIO $ hPutStrLn stderr $ showSDocDebug (hsc_dflags session) $ ppr $ mi_module iface
+    liftIO $ hPutStrLn stderr $ showSDocDebug (hsc_dflags session) $ ppr $ md_types details
+    -- liftIO $ hPutStrLn stderr $ showSDocDebug (hsc_dflags session) $ ppr $ mi_module iface
+    -- let cons IfaceData{ifName,ifCons} = Just (ifName,con)
+    --       where con = case ifCons of
+    --               IfDataTyCon xs -> map ifConName xs
+    --     cons _ = Nothing
+    -- liftIO $ hPutStrLn stderr $ showSDocDebug (hsc_dflags session) $ ppr $ mapMaybe (cons . snd) $  mi_decls iface
     let mod_info = HomeModInfo iface details Nothing
     return $ TcModuleResult tcm mod_info upgradedError
   where
@@ -381,6 +393,14 @@ loadDepModuleIO iface linkable hsc = do
     details <- liftIO $ fixIO $ \details -> do
         let hsc' = hsc { hsc_HPT = addToHpt (hsc_HPT hsc) mod (HomeModInfo iface details linkable) }
         initIfaceLoad hsc' (typecheckIface iface)
+    hPutStrLn stderr $ "#####################################################"
+    hPutStrLn stderr $ showSDocDebug (hsc_dflags hsc) $ ppr $ mi_module iface
+    hPutStrLn stderr $ showSDocDebug (hsc_dflags hsc) $ ppr $ md_types details
+    let cons IfaceData{ifName,ifCons} = Just (ifName,con)
+          where con = case ifCons of
+                  IfDataTyCon xs -> map ifConName xs
+        cons _ = Nothing
+    hPutStrLn stderr $ showSDocDebug (hsc_dflags hsc) $ ppr $ mapMaybe (cons . snd) $  mi_decls iface
     let mod_info = HomeModInfo iface details linkable
     return $ loadModuleHome mod_info hsc
     where

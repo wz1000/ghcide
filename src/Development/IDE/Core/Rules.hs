@@ -30,6 +30,7 @@ module Development.IDE.Core.Rules(
     ) where
 
 import Fingerprint
+import System.IO
 
 import Data.Binary hiding (get, put)
 import Data.Tuple.Extra
@@ -652,37 +653,43 @@ ghcSessionDepsDefinition file = do
         (ms,_) <- useWithStale_ GetModSummaryWithoutTimestamps file
         (deps,_) <- useWithStale_ GetDependencies file
         let tdeps = transitiveModuleDeps deps
-        ifaces <- uses_ GetModIface tdeps
 
         -- Figure out whether we need TemplateHaskell or QuasiQuotes support
         let graph_needs_th_qq = needsTemplateHaskellOrQQ $ hsc_mod_graph hsc
             file_uses_th_qq   = uses_th_qq $ ms_hspp_opts ms
             any_uses_th_qq    = graph_needs_th_qq || file_uses_th_qq
 
-        bytecodes <- if any_uses_th_qq
-            then -- If we use TH or QQ, we must obtain the bytecode
-            fmap Just <$> uses_ GenerateByteCode (transitiveModuleDeps deps)
-            else
-            pure $ repeat Nothing
+        xs <-
+          if any_uses_th_qq
+          then do -- If we use TH or QQ, we must obtain the bytecode
+            modifyFilesOfInterest' (\s -> foldr HashSet.insert s tdeps)
+            tms <- uses_ TypeCheck tdeps
+            bs <- fmap Just <$> uses_ GenerateByteCode tdeps
+            pure $ zipWith (\t@TcModuleResult{..} bc -> (tmrModSummary t, (hm_iface tmrModInfo, bc))) tms bs
+          else do
+            ifaces <- uses_ GetModIface tdeps
+            pure $ zipWith unpack ifaces (repeat Nothing)
 
         -- Currently GetDependencies returns things in topological order so A comes before B if A imports B.
         -- We need to reverse this as GHC gets very unhappy otherwise and complains about broken interfaces.
         -- Long-term we might just want to change the order returned by GetDependencies
-        let inLoadOrder = reverse (zipWith unpack ifaces bytecodes)
+        let inLoadOrder = reverse $ map snd xs
+            msums = map fst xs
 
         (session',_) <- liftIO $ runGhcEnv hsc $ do
-            setupFinderCache (map hirModSummary ifaces)
+            setupFinderCache msums
             mapM_ (uncurry loadDepModule) inLoadOrder
 
         res <- liftIO $ newHscEnvEq session' []
         return ([], Just res)
  where
-  unpack HiFileResult{..} bc = (hirModIface, bc)
+  unpack HiFileResult{..} bc = (hirModSummary, (hirModIface, bc))
   uses_th_qq dflags =
     xopt LangExt.TemplateHaskell dflags || xopt LangExt.QuasiQuotes dflags
 
 getModIfaceFromDiskRule :: Rules ()
 getModIfaceFromDiskRule = defineEarlyCutoff $ \GetModIfaceFromDisk f -> do
+  liftIO $ hPutStrLn stderr $ "GetModIfaceFromDisk" ++ show f
   ms <- use_ GetModSummary f
   (diags_session, mb_session) <- ghcSessionDepsDefinition f
   case mb_session of
