@@ -3040,10 +3040,17 @@ ifaceErrorTest2 = testCase "iface-error-test-2" $ withoutStackEnv $ runWithExtra
                       ]
 
     -- Change y from Int to B
-    changeDoc bdoc [TextDocumentContentChangeEvent Nothing Nothing $ T.unlines ["module B where", "y :: Bool", "y = undefined"]]
 
     -- Add a new definition to P
     changeDoc pdoc [TextDocumentContentChangeEvent Nothing Nothing $ pSource <> "\nfoo = y :: Bool" ]
+    expectDiagnostics
+    -- As in the other test, P is being typechecked with the last successful artifacts for A
+    -- (ot thanks to -fdeferred-type-errors)
+      [("P.hs", [(DsError, (6, 6), "Couldn't match expected type 'Bool' with actual type 'Int'")])
+      ,("P.hs", [(DsWarning,(4,0), "Top-level binding")])
+      ,("P.hs", [(DsWarning,(6,0), "Top-level binding")])
+      ]
+    changeDoc bdoc [TextDocumentContentChangeEvent Nothing Nothing $ T.unlines ["module B where", "y :: Bool", "y = undefined"]]
     -- Now in P we have
     -- bar = x :: Int
     -- foo = y :: Bool
@@ -3053,8 +3060,6 @@ ifaceErrorTest2 = testCase "iface-error-test-2" $ withoutStackEnv $ runWithExtra
     -- As in the other test, P is being typechecked with the last successful artifacts for A
     -- (ot thanks to -fdeferred-type-errors)
       [("A.hs", [(DsError, (5, 4), "Couldn't match expected type 'Int' with actual type 'Bool'")])
-      ,("P.hs", [(DsWarning,(4,0), "Top-level binding")])
-      ,("P.hs", [(DsWarning,(6,0), "Top-level binding")])
       ]
     expectNoMoreDiagnostics 2
 
