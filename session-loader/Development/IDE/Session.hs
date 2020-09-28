@@ -49,9 +49,8 @@ import HIE.Bios
 import HIE.Bios.Environment hiding (getCacheDir)
 import HIE.Bios.Types
 import Hie.Implicit.Cradle (loadImplicitHieCradle)
-import Language.Haskell.LSP.Core
-import Language.Haskell.LSP.Messages
-import Language.Haskell.LSP.Types
+import Language.LSP.Core
+import Language.LSP.Types
 import System.Directory
 import qualified System.Directory.Extra as IO
 import System.FilePath
@@ -104,12 +103,11 @@ loadSession dir = do
   runningCradle <- newVar dummyAs :: IO (Var (Async (IdeResult HscEnvEq,[FilePath])))
 
   return $ do
-    extras@ShakeExtras{logger, eventer, restartShakeSession,
-                       withIndefiniteProgress, ideNc, knownTargetsVar
+    extras@ShakeExtras{logger, restartShakeSession, ideNc, knownTargetsVar, lspEnv
                       } <- getShakeExtras
 
     IdeOptions{ optTesting = IdeTesting optTesting
-              , optCheckProject = CheckProject checkProject
+              , optCheckProject = getCheckProject
               , optCustomDynFlags
               , optExtensions
               } <- getIdeOptions
@@ -249,6 +247,7 @@ loadSession dir = do
           restartShakeSession [kick]
 
           -- Typecheck all files in the project on startup
+          CheckProject checkProject <- getCheckProject
           unless (null cs || not checkProject) $ do
                 cfps' <- liftIO $ filterM (IO.doesFileExist . fromNormalizedFilePath) (concatMap targetLocations cs)
                 void $ shakeEnqueue extras $ mkDelayedAction "InitialLoad" Debug $ void $ do
@@ -267,17 +266,19 @@ loadSession dir = do
            lfp <- flip makeRelative cfp <$> getCurrentDirectory
            logInfo logger $ T.pack ("Consulting the cradle for " <> show lfp)
 
-           when (isNothing hieYaml) $ eventer $ notifyUserImplicitCradle lfp
+           when (isNothing hieYaml) $ mRunLspT lspEnv $
+             sendNotification SWindowShowMessage $ notifyUserImplicitCradle lfp
 
            cradle <- maybe (loadImplicitHieCradle $ addTrailingPathSeparator dir) loadCradle hieYaml
 
-           when optTesting $ eventer $ notifyCradleLoaded lfp
+           when optTesting $ mRunLspT lspEnv $
+            sendNotification (SCustomMethod "ghcide/cradle/loaded") (toJSON cfp)
 
            -- Display a user friendly progress message here: They probably don't know what a cradle is
            let progMsg = "Setting up " <> T.pack (takeBaseName (cradleRootDir cradle))
                          <> " (for " <> T.pack lfp <> ")"
-           eopts <- withIndefiniteProgress progMsg NotCancellable $
-             cradleToOptsAndLibDir cradle cfp
+           eopts <- mRunLspTCallback lspEnv (withIndefiniteProgress progMsg NotCancellable) $
+              cradleToOptsAndLibDir cradle cfp
 
            logDebug logger $ T.pack ("Session loading result: " <> show eopts)
            case eopts of
@@ -677,23 +678,11 @@ getCacheDir prefix opts = getXdgDirectory XdgCache (cacheDir </> prefix ++ "-" +
 cacheDir :: String
 cacheDir = "ghcide"
 
-notifyUserImplicitCradle:: FilePath -> FromServerMessage
-notifyUserImplicitCradle fp =
-    NotShowMessage $
-    NotificationMessage "2.0" WindowShowMessage $ ShowMessageParams MtWarning $
-      "No [cradle](https://github.com/mpickering/hie-bios#hie-bios) found for "
-      <> T.pack fp <>
-      ".\n Proceeding with [implicit cradle](https://hackage.haskell.org/package/implicit-hie)"
-
-notifyCradleLoaded :: FilePath -> FromServerMessage
-notifyCradleLoaded fp =
-    NotCustomServer $
-    NotificationMessage "2.0" (CustomServerMethod cradleLoadedMethod) $
-    toJSON fp
-
-cradleLoadedMethod :: T.Text
-cradleLoadedMethod = "ghcide/cradle/loaded"
-
+notifyUserImplicitCradle:: FilePath -> ShowMessageParams
+notifyUserImplicitCradle fp =ShowMessageParams MtWarning $
+  "No [cradle](https://github.com/mpickering/hie-bios#hie-bios) found for "
+  <> T.pack fp <>
+  ".\n Proceeding with [implicit cradle](https://hackage.haskell.org/package/implicit-hie)"
 ----------------------------------------------------------------------------------------------------
 
 data PackageSetupException

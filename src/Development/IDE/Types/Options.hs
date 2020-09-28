@@ -31,12 +31,13 @@ import Development.Shake
 import Development.IDE.GHC.Util
 import           GHC hiding (parseModule, typecheckModule)
 import           GhcPlugins                     as GHC hiding (fst3, (<>))
-import qualified Language.Haskell.LSP.Types.Capabilities as LSP
+import qualified Language.LSP.Types.Capabilities as LSP
 import qualified Data.Text as T
 import Development.IDE.Types.Diagnostics
 import Control.DeepSeq (NFData(..))
 import Data.Aeson
 import GHC.Generics
+import Data.Hashable
 
 data IdeGhcSession = IdeGhcSession
   { loadSessionFun :: FilePath -> IO (IdeResult HscEnvEq, [FilePath])
@@ -85,9 +86,9 @@ data IdeOptions = IdeOptions
     --   features such as diagnostics and go-to-definition, in
     --   situations in which they would become unavailable because of
     --   the presence of type errors, holes or unbound variables.
-  , optCheckProject :: CheckProject
+  , optCheckProject :: IO CheckProject
     -- ^ Whether to typecheck the entire project on load
-  , optCheckParents :: CheckParents
+  , optCheckParents :: IO CheckParents
     -- ^ When to typecheck reverse dependencies of a file
   , optHaddockParse :: OptHaddockParse
     -- ^ Whether to return result of parsing module with Opt_Haddock.
@@ -104,7 +105,7 @@ data OptHaddockParse = HaddockParse | NoHaddockParse
 
 newtype CheckProject = CheckProject { shouldCheckProject :: Bool }
   deriving stock (Eq, Ord, Show)
-  deriving newtype (FromJSON,ToJSON)
+  deriving newtype (FromJSON,ToJSON, Hashable, NFData)
 data CheckParents
     -- Note that ordering of constructors is meaningful and must be monotonically
     -- increasing in the scenarios where parents are checked
@@ -113,17 +114,17 @@ data CheckParents
     | CheckOnSaveAndClose
     | AlwaysCheck
   deriving stock (Eq, Ord, Show, Generic)
-  deriving anyclass (FromJSON, ToJSON)
+  deriving anyclass (FromJSON, ToJSON, Hashable, NFData)
 
 data LspConfig
   = LspConfig
-  { checkParents :: CheckParents
-  , checkProject :: CheckProject
+  { checkParents :: Maybe CheckParents
+  , checkProject :: Maybe CheckProject
   } deriving stock (Eq, Ord, Show, Generic)
-    deriving anyclass (FromJSON, ToJSON)
+    deriving anyclass (FromJSON, ToJSON, Hashable, NFData)
 
 defaultLspConfig :: LspConfig
-defaultLspConfig = LspConfig CheckOnSaveAndClose (CheckProject True)
+defaultLspConfig = LspConfig (Just CheckOnSaveAndClose) (Just $ CheckProject True)
 
 data IdePreprocessedSource = IdePreprocessedSource
   { preprocWarnings :: [(GHC.SrcSpan, String)]
@@ -157,8 +158,8 @@ defaultIdeOptions session = IdeOptions
     ,optKeywords = haskellKeywords
     ,optDefer = IdeDefer True
     ,optTesting = IdeTesting False
-    ,optCheckProject = checkProject defaultLspConfig
-    ,optCheckParents = checkParents defaultLspConfig
+    ,optCheckProject = pure $ CheckProject True
+    ,optCheckParents = pure $ CheckOnSaveAndClose
     ,optHaddockParse = HaddockParse
     ,optCustomDynFlags = id
     }

@@ -15,6 +15,7 @@ module Development.IDE.Test
   , standardizeQuotes
   ) where
 
+import qualified Data.Aeson as A
 import Control.Applicative.Combinators
 import Control.Lens hiding (List)
 import Control.Monad
@@ -22,14 +23,15 @@ import Control.Monad.IO.Class
 import Data.Bifunctor (second)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
-import Language.Haskell.LSP.Test hiding (message)
-import qualified Language.Haskell.LSP.Test as LspTest
-import Language.Haskell.LSP.Types
-import Language.Haskell.LSP.Types.Lens as Lsp
+import Language.LSP.Test hiding (message)
+import qualified Language.LSP.Test as LspTest
+import Language.LSP.Types
+import Language.LSP.Types.Lens as Lsp
 import System.Time.Extra
 import Test.Tasty.HUnit
 import System.Directory (canonicalizePath)
 import Data.Maybe (fromJust)
+import Development.IDE.Plugin.Test
 
 
 -- | (0-based line number, 0-based column number)
@@ -67,22 +69,23 @@ expectNoMoreDiagnostics timeout = do
     -- Send a dummy message to provoke a response from the server.
     -- This guarantees that we have at least one message to
     -- process, so message won't block or timeout.
-    void $ sendRequest (CustomClientMethod "non-existent-method") ()
-    handleMessages
+    let m = SCustomMethod "ghcide/queue/count"
+    i <- sendRequest m $ A.toJSON GetShakeSessionQueueCount
+    handleMessages m i
   where
-    handleMessages = handleDiagnostic <|> handleCustomMethodResponse <|> ignoreOthers
+    handleMessages m i = handleDiagnostic <|> handleCustomMethodResponse m i <|> ignoreOthers m i
     handleDiagnostic = do
-        diagsNot <- LspTest.message :: Session PublishDiagnosticsNotification
+        diagsNot <- LspTest.message STextDocumentPublishDiagnostics
         let fileUri = diagsNot ^. params . uri
             actual = diagsNot ^. params . diagnostics
         liftIO $ assertFailure $
             "Got unexpected diagnostics for " <> show fileUri <>
             " got " <> show actual
-    handleCustomMethodResponse =
+    handleCustomMethodResponse m i =
         -- the CustomClientMethod triggers a RspCustomServer
         -- handle that and then exit
-        void (LspTest.message :: Session CustomResponse)
-    ignoreOthers = void anyMessage >> handleMessages
+        void (LspTest.responseForId m i)
+    ignoreOthers m i = void anyMessage >> handleMessages m i
 
 expectDiagnostics :: [(FilePath, [(DiagnosticSeverity, Cursor, T.Text)])] -> Session ()
 expectDiagnostics
@@ -122,7 +125,7 @@ canonicalizeUri :: Uri -> IO Uri
 canonicalizeUri uri = filePathToUri <$> canonicalizePath (fromJust (uriToFilePath uri))
 
 diagnostic :: Session PublishDiagnosticsNotification
-diagnostic = LspTest.message
+diagnostic = LspTest.message STextDocumentPublishDiagnostics
 
 standardizeQuotes :: T.Text -> T.Text
 standardizeQuotes msg = let

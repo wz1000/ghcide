@@ -8,7 +8,6 @@ module Main(main) where
 import Arguments
 import Control.Concurrent.Extra
 import Control.Monad.Extra
-import Control.Lens ( (^.) )
 import Data.Default
 import Data.List.Extra
 import Data.Maybe
@@ -32,10 +31,9 @@ import Development.IDE.Plugin.Completions as Completions
 import Development.IDE.Plugin.CodeAction as CodeAction
 import Development.IDE.Plugin.Test as Test
 import Development.IDE.Session
-import qualified Language.Haskell.LSP.Core as LSP
-import Language.Haskell.LSP.Messages
-import Language.Haskell.LSP.Types
-import Language.Haskell.LSP.Types.Lens (params, initializationOptions)
+import qualified Language.LSP.Core as LSP
+import Language.LSP.Types
+import Language.LSP.Types.Lens (params, initializationOptions)
 import Development.IDE.LSP.LanguageServer
 import qualified System.Directory.Extra as IO
 import System.Environment
@@ -83,38 +81,34 @@ main = do
 
     let plugins = Completions.plugin <> CodeAction.plugin
             <> if argsTesting then Test.plugin else mempty
-        onInitialConfiguration :: InitializeRequest -> Either T.Text LspConfig
-        onInitialConfiguration x = case x ^. params . initializationOptions of
-          Nothing -> Right defaultLspConfig
-          Just v -> case J.fromJSON v of
-            J.Error err -> Left $ T.pack err
-            J.Success a -> Right a
-        onConfigurationChange = const $ Left "Updating Not supported"
         options = def { LSP.executeCommandCommands = Just [command]
                       , LSP.completionTriggerCharacters = Just "."
                       }
+        onConfigurationChange _ide v = pure $ case J.fromJSON v of
+          J.Error err -> Left $ T.pack err
+          J.Success a -> Right a
 
     if argLSP then do
         t <- offsetTime
         hPutStrLn stderr "Starting LSP server..."
         hPutStrLn stderr "If you are seeing this in a terminal, you probably should have run ghcide WITHOUT the --lsp option!"
-        runLanguageServer options (pluginHandler plugins) onInitialConfiguration onConfigurationChange $ \getLspId event vfs caps wProg wIndefProg getConfig rootPath -> do
+        runLanguageServer options onConfigurationChange (pluginHandlers plugins) $ \env vfs rootPath -> do
             t <- t
             hPutStrLn stderr $ "Started LSP server in " ++ showDuration t
             sessionLoader <- loadSession $ fromMaybe dir rootPath
-            config <- fromMaybe defaultLspConfig <$> getConfig
+            let config = maybe defaultLspConfig id <$> (LSP.runLspT env LSP.getConfig)
+            caps <- LSP.runLspT env LSP.getClientCapabilities
             let options = (defaultIdeOptions sessionLoader)
                     { optReportProgress = clientSupportsProgress caps
                     , optShakeProfiling = argsShakeProfiling
                     , optTesting        = IdeTesting argsTesting
                     , optThreads        = argsThreads
-                    , optCheckParents   = checkParents config
-                    , optCheckProject   = checkProject config
+                    , optCheckParents   = fromMaybe CheckOnSaveAndClose . checkParents <$> config
+                    , optCheckProject   = fromMaybe (CheckProject True) . checkProject <$> config
                     }
                 logLevel = if argsVerbose then minBound else Info
             debouncer <- newAsyncDebouncer
-            initialise caps (mainRule >> pluginRules plugins)
-                getLspId event wProg wIndefProg (logger logLevel) debouncer options vfs
+            initialise (mainRule >> pluginRules plugins) (Just env) (logger logLevel) debouncer options vfs
     else do
         -- GHC produces messages with UTF8 in them, so make sure the terminal doesn't error
         hSetEncoding stdout utf8
@@ -139,9 +133,8 @@ main = do
         vfs <- makeVFSHandle
         debouncer <- newAsyncDebouncer
         let logLevel = if argsVerbose then minBound else Info
-            dummyWithProg _ _ f = f (const (pure ()))
         sessionLoader <- loadSession dir
-        ide <- initialise def mainRule (pure $ IdInt 0) (showEvent lock) dummyWithProg (const (const id)) (logger logLevel) debouncer (defaultIdeOptions sessionLoader)  vfs
+        ide <- initialise mainRule Nothing (logger logLevel) debouncer (defaultIdeOptions sessionLoader) vfs
 
         putStrLn "\nStep 4/4: Type checking the files"
         setFilesOfInterest ide $ HashMap.fromList $ map ((, OnDisk) . toNormalizedFilePath') files

@@ -2,7 +2,11 @@
 -- SPDX-License-Identifier: Apache-2.0
 
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE GADTs #-}
 #include "ghc-api-version.h"
 
 -- | Go to the definition of a variable.
@@ -22,6 +26,7 @@ module Development.IDE.Plugin.CodeAction
     ) where
 
 import Control.Monad (join, guard)
+import Control.Monad.IO.Class
 import Development.IDE.Plugin
 import Development.IDE.GHC.Compat
 import Development.IDE.Core.Rules
@@ -30,19 +35,18 @@ import Development.IDE.Core.Service
 import Development.IDE.Core.Shake
 import Development.IDE.GHC.Error
 import Development.IDE.GHC.Util
-import Development.IDE.LSP.Server
 import Development.IDE.Plugin.CodeAction.PositionIndexed
 import Development.IDE.Plugin.CodeAction.RuleTypes
 import Development.IDE.Plugin.CodeAction.Rules
 import Development.IDE.Types.Exports
 import Development.IDE.Types.Location
 import Development.IDE.Types.Options
+import Development.IDE.LSP.Server
 import Development.Shake (Rules)
 import qualified Data.HashMap.Strict as Map
-import qualified Language.Haskell.LSP.Core as LSP
-import Language.Haskell.LSP.VFS
-import Language.Haskell.LSP.Messages
-import Language.Haskell.LSP.Types
+import qualified Language.LSP.Core as LSP
+import Language.LSP.VFS
+import Language.LSP.Types
 import qualified Data.Rope.UTF16 as Rope
 import Data.Aeson.Types (toJSON, fromJSON, Value(..), Result(..))
 import Data.Char
@@ -80,14 +84,14 @@ typeSignatureCommandId = "typesignature.add"
 
 -- | Generate code actions.
 codeAction
-    :: LSP.LspFuncs c
-    -> IdeState
+    :: IdeState
     -> TextDocumentIdentifier
     -> Range
     -> CodeActionContext
-    -> IO (Either ResponseError [CAResult])
-codeAction lsp state (TextDocumentIdentifier uri) _range CodeActionContext{_diagnostics=List xs} = do
-    contents <- LSP.getVirtualFileFunc lsp $ toNormalizedUri uri
+    -> LSP.LspM c (Either ResponseError [Command |? CodeAction])
+codeAction state (TextDocumentIdentifier uri) _range CodeActionContext{_diagnostics=List xs} = do
+  contents <- LSP.getVirtualFile $ toNormalizedUri uri
+  liftIO $ do
     let text = Rope.toText . (_text :: VirtualFile -> Rope.Rope) <$> contents
         mbFile = toNormalizedFilePath' <$> uriToFilePath uri
     (ideOptions, parsedModule, join -> env) <- runAction "CodeAction" state $
@@ -100,18 +104,17 @@ codeAction lsp state (TextDocumentIdentifier uri) _range CodeActionContext{_diag
     let exportsMap = localExports <> fromMaybe mempty pkgExports
     let dflags = hsc_dflags . hscEnv <$> env
     pure $ Right
-        [ CACodeAction $ CodeAction title (Just CodeActionQuickFix) (Just $ List [x]) (Just edit) Nothing
+        [ InR $ CodeAction title (Just CodeActionQuickFix) (Just $ List [x]) Nothing (Just edit) Nothing
         | x <- xs, (title, tedit) <- suggestAction dflags exportsMap ideOptions ( join parsedModule ) text x
         , let edit = WorkspaceEdit (Just $ Map.singleton uri $ List tedit) Nothing
         ]
 
 -- | Generate code lenses.
 codeLens
-    :: LSP.LspFuncs c
-    -> IdeState
+    :: IdeState
     -> CodeLensParams
-    -> IO (Either ResponseError (List CodeLens))
-codeLens _lsp ideState CodeLensParams{_textDocument=TextDocumentIdentifier uri} = do
+    -> LSP.LspM c (Either ResponseError (List CodeLens))
+codeLens ideState CodeLensParams{_textDocument=TextDocumentIdentifier uri} = liftIO $ do
     commandId <- makeLspCommandId "typesignature.add"
     fmap (Right . List) $ case uriToFilePath' uri of
       Just (toNormalizedFilePath' -> filePath) -> do
@@ -129,27 +132,25 @@ codeLens _lsp ideState CodeLensParams{_textDocument=TextDocumentIdentifier uri} 
 
 -- | Execute the "typesignature.add" command.
 commandHandler
-    :: LSP.LspFuncs c
-    -> IdeState
+    :: IdeState
     -> ExecuteCommandParams
-    -> IO (Either ResponseError Value, Maybe (ServerMethod, ApplyWorkspaceEditParams))
-commandHandler lsp _ideState ExecuteCommandParams{..}
+    -> LSP.LspM c (Either ResponseError Value)
+commandHandler _ideState ExecuteCommandParams{..}
     -- _command is prefixed with a process ID, because certain clients
     -- have a global command registry, and all commands must be
     -- unique. And there can be more than one ghcide instance running
     -- at a time against the same client.
     | T.isSuffixOf blockCommandId _command
-    = do
-        LSP.sendFunc lsp $ NotCustomServer $
-            NotificationMessage "2.0" (CustomServerMethod "ghcide/blocking/command") Null
-        threadDelay maxBound
-        return (Right Null, Nothing)
+    = do LSP.sendNotification (SCustomMethod "ghcide/blocking/command") Null
+         liftIO $ threadDelay maxBound
+         return (Right Null)
     | T.isSuffixOf typeSignatureCommandId _command
     , Just (List [edit]) <- _arguments
     , Success wedit <- fromJSON edit
-    = return (Right Null, Just (WorkspaceApplyEdit, ApplyWorkspaceEditParams wedit))
+    = do void $ LSP.sendRequest SWorkspaceApplyEdit (ApplyWorkspaceEditParams (Just _command) wedit) (const $ pure ())
+         return (Right Null)
     | otherwise
-    = return (Right Null, Nothing)
+    = return (Right Null)
 
 suggestAction
   :: Maybe DynFlags
@@ -171,7 +172,7 @@ suggestAction dflags packageExports ideOptions parsedModule text diag = concat
     , removeRedundantConstraints text diag
     , suggestAddTypeAnnotationToSatisfyContraints text diag
     ] ++ concat
-    [  suggestConstraint pm text diag  
+    [  suggestConstraint pm text diag
     ++ suggestNewDefinition ideOptions pm text diag
     ++ suggestRemoveRedundantImport pm text diag
     ++ suggestNewImport packageExports pm diag
@@ -555,7 +556,7 @@ processHoleSuggestions mm = (holeSuggestions, refSuggestions)
       Valid refinement hole fits include
         fromMaybe (_ :: LSP.Handlers) (_ :: Maybe LSP.Handlers)
         fromJust (_ :: Maybe LSP.Handlers)
-        haskell-lsp-types-0.22.0.0:Language.Haskell.LSP.Types.Window.$sel:_value:ProgressParams (_ :: ProgressParams
+        haskell-lsp-types-0.22.0.0:Language.LSP.Types.Window.$sel:_value:ProgressParams (_ :: ProgressParams
                                                                                                         LSP.Handlers)
         T.foldl (_ :: LSP.Handlers -> Char -> LSP.Handlers)
                 (_ :: LSP.Handlers)
@@ -667,7 +668,7 @@ suggestConstraint parsedModule mContents diag@Diagnostic {..}
   | Just contents <- mContents
   , Just missingConstraint <- findMissingConstraint _message
   = let codeAction = if _message =~ ("the type signature for:" :: String)
-                        then suggestFunctionConstraint parsedModule 
+                        then suggestFunctionConstraint parsedModule
                         else suggestInstanceConstraint contents
      in codeAction diag missingConstraint
   | otherwise = []
@@ -769,14 +770,14 @@ suggestFunctionConstraint ParsedModule{pm_parsed_source = L _ HsModule{hsmodDecl
   | Just typeSignatureName <- findTypeSignatureName _message
   = let mExistingConstraints = findExistingConstraints _message
         newConstraint = buildNewConstraints missingConstraint mExistingConstraints
-     in case findRangeOfContextForFunctionNamed typeSignatureName of 
+     in case findRangeOfContextForFunctionNamed typeSignatureName of
        Just range -> [(actionTitle missingConstraint typeSignatureName, [TextEdit range newConstraint])]
        Nothing -> []
   | otherwise = []
     where
-      findRangeOfContextForFunctionNamed :: T.Text -> Maybe Range 
+      findRangeOfContextForFunctionNamed :: T.Text -> Maybe Range
       findRangeOfContextForFunctionNamed typeSignatureName = do
-          locatedType <- listToMaybe 
+          locatedType <- listToMaybe
               [ locatedType
               | L _ (SigD _ (TypeSig _ identifiers (HsWC _ (HsIB _ locatedType)))) <- hsmodDecls
               , any (`isSameName` T.unpack typeSignatureName) $ fmap unLoc identifiers
@@ -1083,16 +1084,11 @@ matchRegex message regex = case message =~~ regex of
     Just (_ :: T.Text, _ :: T.Text, _ :: T.Text, bindings) -> Just bindings
     Nothing -> Nothing
 
-setHandlersCodeLens :: PartialHandlers c
-setHandlersCodeLens = PartialHandlers $ \WithMessage{..} x -> return x{
-    LSP.codeLensHandler =
-        withResponse RspCodeLens codeLens,
-    LSP.executeCommandHandler =
-        withResponseAndRequest
-            RspExecuteCommand
-            ReqApplyWorkspaceEdit
-            commandHandler
-    }
+setHandlersCodeLens :: LSP.Handlers (ServerM c)
+setHandlersCodeLens = mconcat
+  [ requestHandler STextDocumentCodeLens codeLens
+  , requestHandler SWorkspaceExecuteCommand commandHandler
+  ]
 
 filterNewlines :: T.Text -> T.Text
 filterNewlines = T.concat  . T.lines

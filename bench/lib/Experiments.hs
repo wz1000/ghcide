@@ -1,5 +1,6 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE ImpredicativeTypes #-}
@@ -25,7 +26,7 @@ import Control.Concurrent
 import Control.Exception.Safe
 import Control.Monad.Extra
 import Control.Monad.IO.Class
-import Data.Aeson (Value(Null))
+import Data.Aeson (Value(Null), toJSON)
 import Data.Char (isDigit)
 import Data.List
 import Data.Maybe
@@ -33,9 +34,9 @@ import qualified Data.Text as T
 import Data.Version
 import Development.IDE.Plugin.Test
 import Experiments.Types
-import Language.Haskell.LSP.Test
-import Language.Haskell.LSP.Types
-import Language.Haskell.LSP.Types.Capabilities
+import Language.LSP.Test
+import Language.LSP.Types
+import Language.LSP.Types.Capabilities
 import Numeric.Natural
 import Options.Applicative
 import System.Directory
@@ -82,7 +83,7 @@ experiments =
         isJust <$> getHover doc ?identifierP,
       ---------------------------------------------------------------------------------------
       bench "getDefinition" 10 $ \doc ->
-        not . null <$> getDefinitions doc ?identifierP,
+        either (not . null) (not . null) . toEither <$> getDefinitions doc ?identifierP,
       ---------------------------------------------------------------------------------------
       bench "documentSymbols" 100 $
         fmap (either (not . null) (not . null)) . getDocumentSymbols,
@@ -203,9 +204,7 @@ benchWithSetup name samples benchSetup experiment = Bench {..}
 
 bench :: String -> Natural -> (HasPositions => Experiment) -> Bench
 bench name defSamples userExperiment =
-  benchWithSetup name defSamples (const $ pure ()) experiment
-  where
-    experiment () = userExperiment
+  benchWithSetup name defSamples (const $ pure ()) (const userExperiment)
 
 runBenchmarksFun :: HasConfig => FilePath -> [Bench] -> IO ()
 runBenchmarksFun dir allBenchmarks = do
@@ -311,8 +310,9 @@ badRun :: BenchRun
 badRun = BenchRun 0 0 0 0 0 False 0 0
 
 waitForProgressDone :: Session ()
-waitForProgressDone =
-      void(skipManyTill anyMessage message :: Session WorkDoneProgressEndNotification)
+waitForProgressDone = void $ skipManyTill anyMessage $ satisfyMaybe $ \case
+  FromServerMess SProgress (NotificationMessage _ _ (ProgressParams _ (End _))) -> Just ()
+  _ -> pure ()
 
 runBench ::
   (?config :: Config) =>
@@ -362,8 +362,9 @@ runBench runSess b = handleAny (\e -> print e >> return badRun)
               else do
                 output (showDuration t)
                 -- Wait for the delayed actions to finish
-                waitId <- sendRequest (CustomClientMethod "test") WaitForShakeQueue
-                (td, resp) <- duration $ skipManyTill anyMessage $ responseForId waitId
+                let m = SCustomMethod "ghcide/blocking/queue"
+                waitId <- sendRequest m (toJSON WaitForShakeQueue)
+                (td, resp) <- duration $ skipManyTill anyMessage $ responseForId m waitId
                 case resp of
                     ResponseMessage{_result=Right Null} -> do
                       loop (userWaits+t) (delayedWork+td) (n -1)

@@ -52,8 +52,8 @@ library
         Glob,
         haddock-library >= 1.8,
         hashable,
-        haskell-lsp-types == 0.22.*,
-        haskell-lsp == 0.22.*,
+        lsp-types == 1.0.*,
+        lsp == 1.0.*,
         mtl,
         network-uri,
         prettyprinter-ansi-terminal,
@@ -72,7 +72,8 @@ library
         transformers,
         unordered-containers >= 0.2.10.0,
         utf8-string,
-        hslogger
+        hslogger,
+        unliftio
     if flag(ghc-lib)
       build-depends:
         ghc-lib >= 8.8,
@@ -202,7 +203,7 @@ library
       other-modules:
         Development.IDE.GHC.HieAst
         Development.IDE.GHC.HieBin
-    ghc-options: -Wall -Wno-name-shadowing -Wincomplete-uni-patterns
+    ghc-options: -Wall -Wno-name-shadowing -Wincomplete-uni-patterns -Wno-unticked-promoted-constructors
 
 executable ghcide-test-preprocessor
     default-language: Haskell2010
@@ -278,8 +279,8 @@ executable ghcide
         filepath,
         gitrev,
         hashable,
-        haskell-lsp,
-        haskell-lsp-types,
+        lsp,
+        lsp-types,
         hie-bios,
         ghcide,
         lens,
@@ -334,8 +335,8 @@ test-suite ghcide-tests
         ghcide,
         ghc-typelits-knownnat,
         haddock-library,
-        haskell-lsp,
-        haskell-lsp-types,
+        lsp,
+        lsp-types,
         network-uri,
         lens,
         lsp-test >= 0.11.0.6 && < 0.12,

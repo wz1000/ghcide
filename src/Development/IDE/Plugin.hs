@@ -1,42 +1,43 @@
-
-module Development.IDE.Plugin(Plugin(..), codeActionPlugin, codeActionPluginWithRules,makeLspCommandId,getPid) where
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE GADTs      #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+module Development.IDE.Plugin where
 
 import Data.Default
 import qualified Data.Text as T
 import Development.Shake
-import Development.IDE.LSP.Server
 
-import           Language.Haskell.LSP.Types
+import           Language.LSP.Types
 import Development.IDE.Compat
 import Development.IDE.Core.Rules
-import qualified Language.Haskell.LSP.Core as LSP
-import Language.Haskell.LSP.Messages
-
+import Development.IDE.LSP.Server
+import qualified Language.LSP.Core as LSP
 
 data Plugin c = Plugin
     {pluginRules :: Rules ()
-    ,pluginHandler :: PartialHandlers c
+    ,pluginHandlers :: LSP.Handlers (ServerM c)
     }
 
 instance Default (Plugin c) where
-    def = Plugin mempty def
+    def = Plugin mempty mempty
 
 instance Semigroup (Plugin c) where
-    Plugin x1 y1 <> Plugin x2 y2 = Plugin (x1<>x2) (y1<>y2)
+    Plugin x1 h1 <> Plugin x2 h2 = Plugin (x1<>x2) (h1 <> h2)
 
 instance Monoid (Plugin c) where
     mempty = def
 
 
-codeActionPlugin :: (LSP.LspFuncs c -> IdeState -> TextDocumentIdentifier -> Range -> CodeActionContext -> IO (Either ResponseError [CAResult])) -> Plugin c
+codeActionPlugin :: (IdeState -> TextDocumentIdentifier -> Range -> CodeActionContext -> LSP.LspM c (Either ResponseError [Command |? CodeAction])) -> Plugin c
 codeActionPlugin = codeActionPluginWithRules mempty
 
-codeActionPluginWithRules :: Rules () -> (LSP.LspFuncs c -> IdeState -> TextDocumentIdentifier -> Range -> CodeActionContext -> IO (Either ResponseError [CAResult])) -> Plugin c
-codeActionPluginWithRules rr f = Plugin rr $ PartialHandlers $ \WithMessage{..} x -> return x{
-    LSP.codeActionHandler = withResponse RspCodeAction g
-    }
-    where
-      g lsp state (CodeActionParams a b c _) = fmap List <$> f lsp state a b c
+codeActionPluginWithRules :: forall c. Rules () -> (IdeState -> TextDocumentIdentifier -> Range -> CodeActionContext -> LSP.LspM c (Either ResponseError [Command |? CodeAction])) -> Plugin c
+codeActionPluginWithRules rr f = Plugin rr handlers
+  where
+    handlers :: LSP.Handlers (ServerM c)
+    handlers = requestHandler STextDocumentCodeAction g
+    g state (CodeActionParams _ _ a b c) = fmap List <$> f state a b c
 
 -- | Prefix to uniquely identify commands sent to the client.  This
 -- has two parts
